@@ -64,6 +64,8 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   threadTurns: "projection.thread-turns",
   checkpoints: "projection.checkpoints",
   pendingApprovals: "projection.pending-approvals",
+  workflows: "projection.workflows",
+  workflowRuns: "projection.workflow-runs",
 } as const;
 
 type ProjectorName =
@@ -1362,6 +1364,123 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const applyWorkflowsProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyWorkflowsProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "workflow.created":
+        case "workflow.updated": {
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          const workflowJson = JSON.stringify(event.payload.workflow);
+          yield* sql`
+            INSERT INTO projection_workflows (
+              workflow_id,
+              project_id,
+              title,
+              workflow_json,
+              created_at,
+              updated_at,
+              deleted_at
+            )
+            VALUES (
+              ${event.payload.workflow.id},
+              ${event.payload.workflow.projectId},
+              ${event.payload.workflow.title},
+              ${workflowJson},
+              ${event.payload.workflow.createdAt},
+              ${event.payload.workflow.updatedAt},
+              ${event.payload.workflow.deletedAt}
+            )
+            ON CONFLICT(workflow_id) DO UPDATE SET
+              project_id = excluded.project_id,
+              title = excluded.title,
+              workflow_json = excluded.workflow_json,
+              created_at = excluded.created_at,
+              updated_at = excluded.updated_at,
+              deleted_at = excluded.deleted_at
+          `.pipe(Effect.mapError(toPersistenceSqlError("ProjectionPipeline.workflows:upsert")));
+          return;
+        }
+        case "workflow.deleted":
+          yield* sql`
+            UPDATE projection_workflows
+            SET
+              deleted_at = ${event.payload.deletedAt},
+              updated_at = ${event.payload.deletedAt},
+              workflow_json = json_set(workflow_json, '$.deletedAt', ${event.payload.deletedAt}, '$.updatedAt', ${event.payload.deletedAt})
+            WHERE workflow_id = ${event.payload.workflowId}
+          `.pipe(Effect.mapError(toPersistenceSqlError("ProjectionPipeline.workflows:delete")));
+          return;
+        default:
+          return;
+      }
+    });
+
+    const applyWorkflowRunsProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyWorkflowRunsProjection",
+    )(function* (event, _attachmentSideEffects) {
+      let run:
+        | {
+            readonly id: string;
+            readonly workflowId: string;
+            readonly projectId: string;
+            readonly status: string;
+            readonly createdAt: string;
+            readonly updatedAt: string;
+            readonly completedAt: string | null;
+          }
+        | undefined;
+      let runJson: string | undefined;
+      if (event.type === "workflow.run-started") {
+        run = event.payload.run;
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        runJson = JSON.stringify(event.payload.run);
+      } else if (
+        event.type === "workflow.run-paused" ||
+        event.type === "workflow.run-resumed" ||
+        event.type === "workflow.run-stopping" ||
+        event.type === "workflow.run-completed" ||
+        event.type === "workflow.node-run-started" ||
+        event.type === "workflow.node-run-completed" ||
+        event.type === "workflow.node-run-failed"
+      ) {
+        return;
+      } else {
+        return;
+      }
+
+      yield* sql`
+        INSERT INTO projection_workflow_runs (
+          workflow_run_id,
+          workflow_id,
+          project_id,
+          status,
+          run_json,
+          created_at,
+          updated_at,
+          completed_at
+        )
+        VALUES (
+          ${run.id},
+          ${run.workflowId},
+          ${run.projectId},
+          ${run.status},
+          ${runJson},
+          ${run.createdAt},
+          ${run.updatedAt},
+          ${run.completedAt}
+        )
+        ON CONFLICT(workflow_run_id) DO UPDATE SET
+          workflow_id = excluded.workflow_id,
+          project_id = excluded.project_id,
+          status = excluded.status,
+          run_json = excluded.run_json,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at,
+          completed_at = excluded.completed_at
+      `.pipe(Effect.mapError(toPersistenceSqlError("ProjectionPipeline.workflowRuns:upsert")));
+    });
+
     const projectors: ReadonlyArray<ProjectorDefinition> = [
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.projects,
@@ -1398,6 +1517,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.threads,
         apply: applyThreadsProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.workflows,
+        apply: applyWorkflowsProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.workflowRuns,
+        apply: applyWorkflowRunsProjection,
       },
     ];
 

@@ -5,6 +5,10 @@ import type {
   OrchestrationThread,
   ProjectId,
   ThreadId,
+  WorkflowDefinition,
+  WorkflowId,
+  WorkflowRun,
+  WorkflowRunId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
@@ -36,6 +40,20 @@ export function listThreadsByProjectId(
   projectId: ProjectId,
 ): ReadonlyArray<OrchestrationThread> {
   return readModel.threads.filter((thread) => thread.projectId === projectId);
+}
+
+export function findWorkflowById(
+  readModel: OrchestrationReadModel,
+  workflowId: WorkflowId,
+): WorkflowDefinition | undefined {
+  return (readModel.workflows ?? []).find((workflow) => workflow.id === workflowId);
+}
+
+export function findWorkflowRunById(
+  readModel: OrchestrationReadModel,
+  workflowRunId: WorkflowRunId,
+): WorkflowRun | undefined {
+  return (readModel.workflowRuns ?? []).find((run) => run.id === workflowRunId);
 }
 
 export function requireProject(input: {
@@ -138,6 +156,73 @@ export function requireThreadAbsent(input: {
     invariantError(
       input.command.type,
       `Thread '${input.threadId}' already exists and cannot be created twice.`,
+    ),
+  );
+}
+
+export function requireWorkflow(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly workflowId: WorkflowId;
+}): Effect.Effect<WorkflowDefinition, OrchestrationCommandInvariantError> {
+  const workflow = findWorkflowById(input.readModel, input.workflowId);
+  if (workflow && workflow.deletedAt === null) {
+    return Effect.succeed(workflow);
+  }
+  return Effect.fail(
+    invariantError(
+      input.command.type,
+      `Workflow '${input.workflowId}' does not exist for command '${input.command.type}'.`,
+    ),
+  );
+}
+
+export function requireWorkflowAbsent(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly workflowId: WorkflowId;
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  const workflow = findWorkflowById(input.readModel, input.workflowId);
+  if (!workflow || workflow.deletedAt !== null) {
+    return Effect.void;
+  }
+  return Effect.fail(
+    invariantError(
+      input.command.type,
+      `Workflow '${input.workflowId}' already exists and cannot be created twice.`,
+    ),
+  );
+}
+
+export function requireWorkflowRun(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly workflowRunId: WorkflowRunId;
+}): Effect.Effect<WorkflowRun, OrchestrationCommandInvariantError> {
+  const run = findWorkflowRunById(input.readModel, input.workflowRunId);
+  if (run) {
+    return Effect.succeed(run);
+  }
+  return Effect.fail(
+    invariantError(
+      input.command.type,
+      `Workflow run '${input.workflowRunId}' does not exist for command '${input.command.type}'.`,
+    ),
+  );
+}
+
+export function requireWorkflowRunAbsent(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly workflowRunId: WorkflowRunId;
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  if (!findWorkflowRunById(input.readModel, input.workflowRunId)) {
+    return Effect.void;
+  }
+  return Effect.fail(
+    invariantError(
+      input.command.type,
+      `Workflow run '${input.workflowRunId}' already exists and cannot be created twice.`,
     ),
   );
 }

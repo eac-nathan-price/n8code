@@ -338,6 +338,31 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
               ),
               Effect.catch(() => Effect.succeed(Option.none())),
             );
+          case "workflow.created":
+          case "workflow.updated":
+            return Effect.succeed(
+              Option.some({
+                kind: "workflow-upserted" as const,
+                sequence: event.sequence,
+                workflow: event.payload.workflow,
+              }),
+            );
+          case "workflow.deleted":
+            return Effect.succeed(
+              Option.some({
+                kind: "workflow-removed" as const,
+                sequence: event.sequence,
+                workflowId: event.payload.workflowId,
+              }),
+            );
+          case "workflow.run-started":
+            return Effect.succeed(
+              Option.some({
+                kind: "workflow-run-upserted" as const,
+                sequence: event.sequence,
+                run: event.payload.run,
+              }),
+            );
           default:
             if (event.aggregateKind !== "thread") {
               return Effect.succeed(Option.none());
@@ -826,6 +851,71 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                   snapshot: {
                     snapshotSequence,
                     thread: threadDetail.value,
+                  },
+                }),
+                liveStream,
+              );
+            }),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.subscribeWorkflow]: (input) =>
+          observeRpcStreamEffect(
+            ORCHESTRATION_WS_METHODS.subscribeWorkflow,
+            Effect.gen(function* () {
+              const [shellSnapshot, snapshotSequence] = yield* Effect.all([
+                projectionSnapshotQuery.getShellSnapshot().pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationGetSnapshotError({
+                        message: `Failed to load workflow ${input.workflowId}`,
+                        cause,
+                      }),
+                  ),
+                ),
+                projectionSnapshotQuery.getSnapshotSequence().pipe(
+                  Effect.map(({ snapshotSequence }) => snapshotSequence),
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationGetSnapshotError({
+                        message: "Failed to load orchestration snapshot sequence",
+                        cause,
+                      }),
+                  ),
+                ),
+              ]);
+              const workflow = (shellSnapshot.workflows ?? []).find(
+                (entry) => entry.id === input.workflowId,
+              );
+              if (!workflow) {
+                return yield* new OrchestrationGetSnapshotError({
+                  message: `Workflow ${input.workflowId} was not found`,
+                  cause: input.workflowId,
+                });
+              }
+              const liveStream = orchestrationEngine.streamDomainEvents.pipe(
+                Stream.filter(
+                  (event) =>
+                    (event.aggregateKind === "workflow" &&
+                      event.aggregateId === input.workflowId) ||
+                    (event.aggregateKind === "workflowRun" &&
+                      "workflowId" in event.payload &&
+                      event.payload.workflowId === input.workflowId),
+                ),
+                Stream.map((event) => ({
+                  kind: "event" as const,
+                  event,
+                })),
+              );
+
+              return Stream.concat(
+                Stream.make({
+                  kind: "snapshot" as const,
+                  snapshot: {
+                    snapshotSequence,
+                    workflow,
+                    runs: (shellSnapshot.workflowRuns ?? []).filter(
+                      (run) => run.workflowId === input.workflowId,
+                    ),
                   },
                 }),
                 liveStream,

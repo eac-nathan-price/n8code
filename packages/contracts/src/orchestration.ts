@@ -19,6 +19,11 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
+  WorkflowEdgeId,
+  WorkflowId,
+  WorkflowNodeId,
+  WorkflowNodeRunId,
+  WorkflowRunId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -30,6 +35,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
+  subscribeWorkflow: "orchestration.subscribeWorkflow",
 } as const;
 
 export const ProviderApprovalPolicy = Schema.Literals([
@@ -210,6 +216,131 @@ export const OrchestrationProject = Schema.Struct({
 });
 export type OrchestrationProject = typeof OrchestrationProject.Type;
 
+export const WorkflowNodeKind = Schema.Literals([
+  "agent",
+  "multiagent",
+  "condition",
+  "listFanOut",
+  "merge",
+]);
+export type WorkflowNodeKind = typeof WorkflowNodeKind.Type;
+
+export const WorkflowRunStatus = Schema.Literals([
+  "idle",
+  "running",
+  "paused",
+  "stopping",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export type WorkflowRunStatus = typeof WorkflowRunStatus.Type;
+
+export const WorkflowNodeRunStatus = Schema.Literals([
+  "pending",
+  "ready",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+  "skipped",
+]);
+export type WorkflowNodeRunStatus = typeof WorkflowNodeRunStatus.Type;
+
+export const WorkflowCanvasPosition = Schema.Struct({
+  x: Schema.Number,
+  y: Schema.Number,
+});
+export type WorkflowCanvasPosition = typeof WorkflowCanvasPosition.Type;
+
+export const WorkflowNodeRetryPolicy = Schema.Struct({
+  maxAttempts: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+});
+export type WorkflowNodeRetryPolicy = typeof WorkflowNodeRetryPolicy.Type;
+
+export const WorkflowNodeConfig = Schema.Struct({
+  promptTemplate: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  modelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+  runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
+  interactionMode: ProviderInteractionMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
+  ),
+  inputBindings: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  outputSchema: Schema.optional(Schema.Unknown),
+  retryPolicy: WorkflowNodeRetryPolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed({ maxAttempts: 0 })),
+  ),
+});
+export type WorkflowNodeConfig = typeof WorkflowNodeConfig.Type;
+
+export const WorkflowNodeDefinition = Schema.Struct({
+  id: WorkflowNodeId,
+  kind: WorkflowNodeKind,
+  title: TrimmedNonEmptyString,
+  config: WorkflowNodeConfig,
+  position: WorkflowCanvasPosition,
+});
+export type WorkflowNodeDefinition = typeof WorkflowNodeDefinition.Type;
+
+export const WorkflowEdgeDefinition = Schema.Struct({
+  id: WorkflowEdgeId,
+  sourceNodeId: WorkflowNodeId,
+  targetNodeId: WorkflowNodeId,
+  sourceOutput: Schema.optional(TrimmedNonEmptyString),
+  targetInput: Schema.optional(TrimmedNonEmptyString),
+  condition: Schema.optional(TrimmedNonEmptyString),
+});
+export type WorkflowEdgeDefinition = typeof WorkflowEdgeDefinition.Type;
+
+export const WorkflowDefinition = Schema.Struct({
+  id: WorkflowId,
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString,
+  description: Schema.optional(Schema.String),
+  defaultModelSelection: Schema.NullOr(ModelSelection),
+  nodes: Schema.Array(WorkflowNodeDefinition),
+  edges: Schema.Array(WorkflowEdgeDefinition),
+  version: NonNegativeInt,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  deletedAt: Schema.NullOr(IsoDateTime),
+});
+export type WorkflowDefinition = typeof WorkflowDefinition.Type;
+
+export const WorkflowNodeRun = Schema.Struct({
+  id: WorkflowNodeRunId,
+  workflowRunId: WorkflowRunId,
+  nodeId: WorkflowNodeId,
+  status: WorkflowNodeRunStatus,
+  threadId: Schema.NullOr(ThreadId),
+  parentNodeRunId: Schema.NullOr(WorkflowNodeRunId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  item: Schema.optional(Schema.Unknown),
+  output: Schema.optional(Schema.Unknown),
+  error: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  startedAt: Schema.NullOr(IsoDateTime),
+  completedAt: Schema.NullOr(IsoDateTime),
+  updatedAt: IsoDateTime,
+});
+export type WorkflowNodeRun = typeof WorkflowNodeRun.Type;
+
+export const WorkflowRun = Schema.Struct({
+  id: WorkflowRunId,
+  workflowId: WorkflowId,
+  projectId: ProjectId,
+  status: WorkflowRunStatus,
+  goal: Schema.String,
+  inputs: Schema.Record(Schema.String, Schema.Unknown),
+  nodeRuns: Schema.Array(WorkflowNodeRun),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  completedAt: Schema.NullOr(IsoDateTime),
+});
+export type WorkflowRun = typeof WorkflowRun.Type;
+
 export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 
@@ -360,6 +491,8 @@ export const OrchestrationReadModel = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProject),
   threads: Schema.Array(OrchestrationThread),
+  workflows: Schema.optionalKey(Schema.Array(WorkflowDefinition)),
+  workflowRuns: Schema.optionalKey(Schema.Array(WorkflowRun)),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationReadModel = typeof OrchestrationReadModel.Type;
@@ -403,6 +536,8 @@ export const OrchestrationShellSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProjectShell),
   threads: Schema.Array(OrchestrationThreadShell),
+  workflows: Schema.optionalKey(Schema.Array(WorkflowDefinition)),
+  workflowRuns: Schema.optionalKey(Schema.Array(WorkflowRun)),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationShellSnapshot = typeof OrchestrationShellSnapshot.Type;
@@ -428,6 +563,21 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     sequence: NonNegativeInt,
     threadId: ThreadId,
   }),
+  Schema.Struct({
+    kind: Schema.Literal("workflow-upserted"),
+    sequence: NonNegativeInt,
+    workflow: WorkflowDefinition,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("workflow-removed"),
+    sequence: NonNegativeInt,
+    workflowId: WorkflowId,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("workflow-run-upserted"),
+    sequence: NonNegativeInt,
+    run: WorkflowRun,
+  }),
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;
 
@@ -445,11 +595,23 @@ export const OrchestrationSubscribeThreadInput = Schema.Struct({
 });
 export type OrchestrationSubscribeThreadInput = typeof OrchestrationSubscribeThreadInput.Type;
 
+export const OrchestrationSubscribeWorkflowInput = Schema.Struct({
+  workflowId: WorkflowId,
+});
+export type OrchestrationSubscribeWorkflowInput = typeof OrchestrationSubscribeWorkflowInput.Type;
+
 export const OrchestrationThreadDetailSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   thread: OrchestrationThread,
 });
 export type OrchestrationThreadDetailSnapshot = typeof OrchestrationThreadDetailSnapshot.Type;
+
+export const OrchestrationWorkflowDetailSnapshot = Schema.Struct({
+  snapshotSequence: NonNegativeInt,
+  workflow: WorkflowDefinition,
+  runs: Schema.Array(WorkflowRun),
+});
+export type OrchestrationWorkflowDetailSnapshot = typeof OrchestrationWorkflowDetailSnapshot.Type;
 
 export const ProjectCreateCommand = Schema.Struct({
   type: Schema.Literal("project.create"),
@@ -645,6 +807,66 @@ const ThreadSessionStopCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const WorkflowCreateCommand = Schema.Struct({
+  type: Schema.Literal("workflow.create"),
+  commandId: CommandId,
+  workflow: WorkflowDefinition,
+  createdAt: IsoDateTime,
+});
+
+const WorkflowUpdateCommand = Schema.Struct({
+  type: Schema.Literal("workflow.update"),
+  commandId: CommandId,
+  workflowId: WorkflowId,
+  title: Schema.optional(TrimmedNonEmptyString),
+  description: Schema.optional(Schema.String),
+  defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+  nodes: Schema.optional(Schema.Array(WorkflowNodeDefinition)),
+  edges: Schema.optional(Schema.Array(WorkflowEdgeDefinition)),
+  expectedVersion: Schema.optional(NonNegativeInt),
+  updatedAt: IsoDateTime,
+});
+
+const WorkflowDeleteCommand = Schema.Struct({
+  type: Schema.Literal("workflow.delete"),
+  commandId: CommandId,
+  workflowId: WorkflowId,
+  deletedAt: IsoDateTime,
+});
+
+const WorkflowRunStartCommand = Schema.Struct({
+  type: Schema.Literal("workflow.run.start"),
+  commandId: CommandId,
+  workflowRunId: WorkflowRunId,
+  workflowId: WorkflowId,
+  goal: Schema.String,
+  inputs: Schema.Record(Schema.String, Schema.Unknown).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  createdAt: IsoDateTime,
+});
+
+const WorkflowRunPauseCommand = Schema.Struct({
+  type: Schema.Literal("workflow.run.pause"),
+  commandId: CommandId,
+  workflowRunId: WorkflowRunId,
+  updatedAt: IsoDateTime,
+});
+
+const WorkflowRunResumeCommand = Schema.Struct({
+  type: Schema.Literal("workflow.run.resume"),
+  commandId: CommandId,
+  workflowRunId: WorkflowRunId,
+  updatedAt: IsoDateTime,
+});
+
+const WorkflowRunStopCommand = Schema.Struct({
+  type: Schema.Literal("workflow.run.stop"),
+  commandId: CommandId,
+  workflowRunId: WorkflowRunId,
+  updatedAt: IsoDateTime,
+});
+
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
@@ -662,6 +884,13 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  WorkflowCreateCommand,
+  WorkflowUpdateCommand,
+  WorkflowDeleteCommand,
+  WorkflowRunStartCommand,
+  WorkflowRunPauseCommand,
+  WorkflowRunResumeCommand,
+  WorkflowRunStopCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -683,6 +912,13 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  WorkflowCreateCommand,
+  WorkflowUpdateCommand,
+  WorkflowDeleteCommand,
+  WorkflowRunStartCommand,
+  WorkflowRunPauseCommand,
+  WorkflowRunResumeCommand,
+  WorkflowRunStopCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -751,6 +987,52 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const WorkflowNodeRunStartCommand = Schema.Struct({
+  type: Schema.Literal("workflow.node-run.start"),
+  commandId: CommandId,
+  workflowRunId: WorkflowRunId,
+  nodeRunId: WorkflowNodeRunId,
+  nodeId: WorkflowNodeId,
+  threadId: Schema.optional(ThreadId),
+  parentNodeRunId: Schema.optional(Schema.NullOr(WorkflowNodeRunId)),
+  item: Schema.optional(Schema.Unknown),
+  startedAt: IsoDateTime,
+});
+
+const WorkflowNodeRunCompleteCommand = Schema.Struct({
+  type: Schema.Literal("workflow.node-run.complete"),
+  commandId: CommandId,
+  workflowRunId: WorkflowRunId,
+  nodeRunId: WorkflowNodeRunId,
+  output: Schema.optional(Schema.Unknown),
+  completedAt: IsoDateTime,
+});
+
+const WorkflowNodeRunFailCommand = Schema.Struct({
+  type: Schema.Literal("workflow.node-run.fail"),
+  commandId: CommandId,
+  workflowRunId: WorkflowRunId,
+  nodeRunId: WorkflowNodeRunId,
+  error: TrimmedNonEmptyString,
+  completedAt: IsoDateTime,
+});
+
+const WorkflowRunCompleteCommand = Schema.Struct({
+  type: Schema.Literal("workflow.run.complete"),
+  commandId: CommandId,
+  workflowRunId: WorkflowRunId,
+  status: WorkflowRunStatus,
+  completedAt: IsoDateTime,
+});
+
+const WorkflowDefinitionPatchRequestedCommand = Schema.Struct({
+  type: Schema.Literal("workflow.definition.patch.request"),
+  commandId: CommandId,
+  workflowId: WorkflowId,
+  patch: Schema.Unknown,
+  requestedAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -759,6 +1041,11 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
+  WorkflowNodeRunStartCommand,
+  WorkflowNodeRunCompleteCommand,
+  WorkflowNodeRunFailCommand,
+  WorkflowRunCompleteCommand,
+  WorkflowDefinitionPatchRequestedCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -791,10 +1078,27 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
+  "workflow.created",
+  "workflow.updated",
+  "workflow.deleted",
+  "workflow.run-started",
+  "workflow.run-paused",
+  "workflow.run-resumed",
+  "workflow.run-stopping",
+  "workflow.run-completed",
+  "workflow.node-run-started",
+  "workflow.node-run-completed",
+  "workflow.node-run-failed",
+  "workflow.definition-patch-requested",
 ]);
 export type OrchestrationEventType = typeof OrchestrationEventType.Type;
 
-export const OrchestrationAggregateKind = Schema.Literals(["project", "thread"]);
+export const OrchestrationAggregateKind = Schema.Literals([
+  "project",
+  "thread",
+  "workflow",
+  "workflowRun",
+]);
 export type OrchestrationAggregateKind = typeof OrchestrationAggregateKind.Type;
 export const OrchestrationActorKind = Schema.Literals(["client", "server", "provider"]);
 
@@ -965,6 +1269,68 @@ export const ThreadActivityAppendedPayload = Schema.Struct({
   activity: OrchestrationThreadActivity,
 });
 
+export const WorkflowCreatedPayload = Schema.Struct({
+  workflow: WorkflowDefinition,
+});
+
+export const WorkflowUpdatedPayload = Schema.Struct({
+  workflow: WorkflowDefinition,
+});
+
+export const WorkflowDeletedPayload = Schema.Struct({
+  workflowId: WorkflowId,
+  deletedAt: IsoDateTime,
+});
+
+export const WorkflowRunStartedPayload = Schema.Struct({
+  run: WorkflowRun,
+});
+
+export const WorkflowRunPausedPayload = Schema.Struct({
+  workflowRunId: WorkflowRunId,
+  updatedAt: IsoDateTime,
+});
+
+export const WorkflowRunResumedPayload = Schema.Struct({
+  workflowRunId: WorkflowRunId,
+  updatedAt: IsoDateTime,
+});
+
+export const WorkflowRunStoppingPayload = Schema.Struct({
+  workflowRunId: WorkflowRunId,
+  updatedAt: IsoDateTime,
+});
+
+export const WorkflowRunCompletedPayload = Schema.Struct({
+  workflowRunId: WorkflowRunId,
+  status: WorkflowRunStatus,
+  completedAt: IsoDateTime,
+});
+
+export const WorkflowNodeRunStartedPayload = Schema.Struct({
+  nodeRun: WorkflowNodeRun,
+});
+
+export const WorkflowNodeRunCompletedPayload = Schema.Struct({
+  workflowRunId: WorkflowRunId,
+  nodeRunId: WorkflowNodeRunId,
+  output: Schema.optional(Schema.Unknown),
+  completedAt: IsoDateTime,
+});
+
+export const WorkflowNodeRunFailedPayload = Schema.Struct({
+  workflowRunId: WorkflowRunId,
+  nodeRunId: WorkflowNodeRunId,
+  error: TrimmedNonEmptyString,
+  completedAt: IsoDateTime,
+});
+
+export const WorkflowDefinitionPatchRequestedPayload = Schema.Struct({
+  workflowId: WorkflowId,
+  patch: Schema.Unknown,
+  requestedAt: IsoDateTime,
+});
+
 export const OrchestrationEventMetadata = Schema.Struct({
   providerTurnId: Schema.optional(TrimmedNonEmptyString),
   providerItemId: Schema.optional(ProviderItemId),
@@ -978,7 +1344,7 @@ const EventBaseFields = {
   sequence: NonNegativeInt,
   eventId: EventId,
   aggregateKind: OrchestrationAggregateKind,
-  aggregateId: Schema.Union([ProjectId, ThreadId]),
+  aggregateId: Schema.Union([ProjectId, ThreadId, WorkflowId, WorkflowRunId]),
   occurredAt: IsoDateTime,
   commandId: Schema.NullOr(CommandId),
   causationEventId: Schema.NullOr(EventId),
@@ -1097,6 +1463,66 @@ export const OrchestrationEvent = Schema.Union([
     type: Schema.Literal("thread.activity-appended"),
     payload: ThreadActivityAppendedPayload,
   }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.created"),
+    payload: WorkflowCreatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.updated"),
+    payload: WorkflowUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.deleted"),
+    payload: WorkflowDeletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.run-started"),
+    payload: WorkflowRunStartedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.run-paused"),
+    payload: WorkflowRunPausedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.run-resumed"),
+    payload: WorkflowRunResumedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.run-stopping"),
+    payload: WorkflowRunStoppingPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.run-completed"),
+    payload: WorkflowRunCompletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.node-run-started"),
+    payload: WorkflowNodeRunStartedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.node-run-completed"),
+    payload: WorkflowNodeRunCompletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.node-run-failed"),
+    payload: WorkflowNodeRunFailedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("workflow.definition-patch-requested"),
+    payload: WorkflowDefinitionPatchRequestedPayload,
+  }),
 ]);
 export type OrchestrationEvent = typeof OrchestrationEvent.Type;
 
@@ -1111,6 +1537,18 @@ export const OrchestrationThreadStreamItem = Schema.Union([
   }),
 ]);
 export type OrchestrationThreadStreamItem = typeof OrchestrationThreadStreamItem.Type;
+
+export const OrchestrationWorkflowStreamItem = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("snapshot"),
+    snapshot: OrchestrationWorkflowDetailSnapshot,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("event"),
+    event: OrchestrationEvent,
+  }),
+]);
+export type OrchestrationWorkflowStreamItem = typeof OrchestrationWorkflowStreamItem.Type;
 
 export const OrchestrationCommandReceiptStatus = Schema.Literals(["accepted", "rejected"]);
 export type OrchestrationCommandReceiptStatus = typeof OrchestrationCommandReceiptStatus.Type;
@@ -1230,6 +1668,10 @@ export const OrchestrationRpcSchemas = {
   subscribeThread: {
     input: OrchestrationSubscribeThreadInput,
     output: OrchestrationThreadStreamItem,
+  },
+  subscribeWorkflow: {
+    input: OrchestrationSubscribeWorkflowInput,
+    output: OrchestrationWorkflowStreamItem,
   },
   subscribeShell: {
     input: Schema.Struct({}),

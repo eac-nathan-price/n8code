@@ -3,6 +3,8 @@ import type {
   OrchestrationReadModel,
   ProjectId,
   ThreadId,
+  WorkflowId,
+  WorkflowRunId,
 } from "@t3tools/contracts";
 import { OrchestrationCommand } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -56,8 +58,8 @@ interface CommandEnvelope {
 }
 
 function commandToAggregateRef(command: OrchestrationCommand): {
-  readonly aggregateKind: "project" | "thread";
-  readonly aggregateId: ProjectId | ThreadId;
+  readonly aggregateKind: "project" | "thread" | "workflow" | "workflowRun";
+  readonly aggregateId: ProjectId | ThreadId | WorkflowId | WorkflowRunId;
 } {
   switch (command.type) {
     case "project.create":
@@ -66,6 +68,30 @@ function commandToAggregateRef(command: OrchestrationCommand): {
       return {
         aggregateKind: "project",
         aggregateId: command.projectId,
+      };
+    case "workflow.create":
+      return {
+        aggregateKind: "workflow",
+        aggregateId: command.workflow.id,
+      };
+    case "workflow.update":
+    case "workflow.delete":
+    case "workflow.definition.patch.request":
+      return {
+        aggregateKind: "workflow",
+        aggregateId: command.workflowId,
+      };
+    case "workflow.run.start":
+    case "workflow.run.pause":
+    case "workflow.run.resume":
+    case "workflow.run.stop":
+    case "workflow.node-run.start":
+    case "workflow.node-run.complete":
+    case "workflow.node-run.fail":
+    case "workflow.run.complete":
+      return {
+        aggregateKind: "workflowRun",
+        aggregateId: command.workflowRunId,
       };
     default:
       return {

@@ -12,6 +12,7 @@ import {
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetTurnDiffInput,
   OrchestrationLatestTurn,
+  OrchestrationShellSnapshot,
   ProjectCreatedPayload,
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
@@ -49,6 +50,7 @@ function getOptionValue(
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
+const decodeOrchestrationShellSnapshot = Schema.decodeUnknownEffect(OrchestrationShellSnapshot);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
@@ -184,6 +186,71 @@ it.effect("decodes project.meta-updated payloads with explicit default provider"
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.defaultModelSelection?.instanceId, "claudeAgent");
+  }),
+);
+
+it.effect("decodes workflow create and run start commands", () =>
+  Effect.gen(function* () {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const workflow = {
+      id: "workflow-1",
+      projectId: "project-1",
+      title: "Security audit",
+      defaultModelSelection: {
+        instanceId: "codex",
+        model: "gpt-5.4",
+      },
+      nodes: [
+        {
+          id: "node-1",
+          kind: "agent",
+          title: "Inventory",
+          position: { x: 0, y: 0 },
+          config: {
+            promptTemplate: "List important code blocks for {{goal}}",
+          },
+        },
+      ],
+      edges: [],
+      version: 0,
+      createdAt,
+      updatedAt: createdAt,
+      deletedAt: null,
+    };
+
+    const createCommand = yield* decodeOrchestrationCommand({
+      type: "workflow.create",
+      commandId: "cmd-workflow-create",
+      workflow,
+      createdAt,
+    });
+    assert.strictEqual(createCommand.type, "workflow.create");
+    assert.strictEqual(createCommand.workflow.nodes[0]?.config.runtimeMode, DEFAULT_RUNTIME_MODE);
+
+    const runCommand = yield* decodeOrchestrationCommand({
+      type: "workflow.run.start",
+      commandId: "cmd-workflow-run",
+      workflowRunId: "run-1",
+      workflowId: "workflow-1",
+      goal: "Audit auth",
+      createdAt,
+    });
+    assert.strictEqual(runCommand.type, "workflow.run.start");
+    assert.deepStrictEqual(runCommand.inputs, {});
+  }),
+);
+
+it.effect("decodes shell snapshots without workflow fields for compatibility", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* decodeOrchestrationShellSnapshot({
+      snapshotSequence: 1,
+      projects: [],
+      threads: [],
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(snapshot.workflows, undefined);
+    assert.strictEqual(snapshot.workflowRuns, undefined);
   }),
 );
 

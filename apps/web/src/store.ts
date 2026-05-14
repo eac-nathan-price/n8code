@@ -17,6 +17,10 @@ import type {
   ProjectId,
   ScopedProjectRef,
   ScopedThreadRef,
+  WorkflowDefinition,
+  WorkflowId,
+  WorkflowRun,
+  WorkflowRunId,
 } from "@t3tools/contracts";
 import { isProviderDriverKind, ProviderDriverKind } from "@t3tools/contracts";
 import type { ThreadId, TurnId } from "@t3tools/contracts";
@@ -87,6 +91,11 @@ export interface EnvironmentState {
   // ---------------------------------------------------------------------------
   sidebarThreadSummaryById: Record<ThreadId, SidebarThreadSummary>;
 
+  workflowIds?: WorkflowId[];
+  workflowById?: Record<WorkflowId, WorkflowDefinition>;
+  workflowRunIds?: WorkflowRunId[];
+  workflowRunById?: Record<WorkflowRunId, WorkflowRun>;
+
   bootstrapComplete: boolean;
 }
 
@@ -112,6 +121,10 @@ const initialEnvironmentState: EnvironmentState = {
   turnDiffIdsByThreadId: {},
   turnDiffSummaryByThreadId: {},
   sidebarThreadSummaryById: {},
+  workflowIds: [],
+  workflowById: {},
+  workflowRunIds: [],
+  workflowRunById: {},
   bootstrapComplete: false,
 };
 
@@ -1091,6 +1104,14 @@ function syncEnvironmentShellSnapshot(
     threadSessionById: {},
     threadTurnStateById: {},
     sidebarThreadSummaryById: {},
+    workflowIds: (snapshot.workflows ?? []).map((workflow) => workflow.id),
+    workflowById: Object.fromEntries(
+      (snapshot.workflows ?? []).map((workflow) => [workflow.id, workflow] as const),
+    ) as Record<WorkflowId, WorkflowDefinition>,
+    workflowRunIds: (snapshot.workflowRuns ?? []).map((run) => run.id),
+    workflowRunById: Object.fromEntries(
+      (snapshot.workflowRuns ?? []).map((run) => [run.id, run] as const),
+    ) as Record<WorkflowRunId, WorkflowRun>,
     messageIdsByThreadId: retainThreadScopedRecord(state.messageIdsByThreadId, nextThreadIds),
     messageByThreadId: retainThreadScopedRecord(state.messageByThreadId, nextThreadIds),
     activityIdsByThreadId: retainThreadScopedRecord(state.activityIdsByThreadId, nextThreadIds),
@@ -1630,6 +1651,135 @@ function applyEnvironmentOrchestrationEvent(
     case "thread.approval-response-requested":
     case "thread.user-input-response-requested":
       return state;
+
+    case "workflow.created":
+    case "workflow.updated":
+      return {
+        ...state,
+        workflowIds: (state.workflowIds ?? []).includes(event.payload.workflow.id)
+          ? (state.workflowIds ?? [])
+          : [...(state.workflowIds ?? []), event.payload.workflow.id],
+        workflowById: {
+          ...(state.workflowById ?? {}),
+          [event.payload.workflow.id]: event.payload.workflow,
+        },
+      };
+
+    case "workflow.deleted": {
+      const { [event.payload.workflowId]: _removedWorkflow, ...workflowById } =
+        state.workflowById ?? {};
+      return {
+        ...state,
+        workflowIds: removeId(state.workflowIds ?? [], event.payload.workflowId),
+        workflowById,
+      };
+    }
+
+    case "workflow.run-started":
+      return {
+        ...state,
+        workflowRunIds: (state.workflowRunIds ?? []).includes(event.payload.run.id)
+          ? (state.workflowRunIds ?? [])
+          : [...(state.workflowRunIds ?? []), event.payload.run.id],
+        workflowRunById: {
+          ...(state.workflowRunById ?? {}),
+          [event.payload.run.id]: event.payload.run,
+        },
+      };
+
+    case "workflow.run-paused":
+    case "workflow.run-resumed":
+    case "workflow.run-stopping": {
+      const run = state.workflowRunById?.[event.payload.workflowRunId];
+      if (!run) return state;
+      const status =
+        event.type === "workflow.run-paused"
+          ? "paused"
+          : event.type === "workflow.run-resumed"
+            ? "running"
+            : "stopping";
+      return {
+        ...state,
+        workflowRunById: {
+          ...(state.workflowRunById ?? {}),
+          [run.id]: { ...run, status, updatedAt: event.payload.updatedAt },
+        },
+      };
+    }
+
+    case "workflow.run-completed": {
+      const run = state.workflowRunById?.[event.payload.workflowRunId];
+      if (!run) return state;
+      return {
+        ...state,
+        workflowRunById: {
+          ...(state.workflowRunById ?? {}),
+          [run.id]: {
+            ...run,
+            status: event.payload.status,
+            updatedAt: event.payload.completedAt,
+            completedAt: event.payload.completedAt,
+          },
+        },
+      };
+    }
+
+    case "workflow.node-run-started": {
+      const run = state.workflowRunById?.[event.payload.nodeRun.workflowRunId];
+      if (!run) return state;
+      return {
+        ...state,
+        workflowRunById: {
+          ...(state.workflowRunById ?? {}),
+          [run.id]: {
+            ...run,
+            nodeRuns: [
+              ...run.nodeRuns.filter((nodeRun) => nodeRun.id !== event.payload.nodeRun.id),
+              event.payload.nodeRun,
+            ],
+            updatedAt: event.payload.nodeRun.updatedAt,
+          },
+        },
+      };
+    }
+
+    case "workflow.node-run-completed":
+    case "workflow.node-run-failed": {
+      const run = state.workflowRunById?.[event.payload.workflowRunId];
+      if (!run) return state;
+      const failed = event.type === "workflow.node-run-failed";
+      const completedAt = event.payload.completedAt;
+      return {
+        ...state,
+        workflowRunById: {
+          ...(state.workflowRunById ?? {}),
+          [run.id]: {
+            ...run,
+            status: failed ? "failed" : run.status,
+            completedAt: failed ? completedAt : run.completedAt,
+            updatedAt: completedAt,
+            nodeRuns: run.nodeRuns.map((nodeRun) =>
+              nodeRun.id === event.payload.nodeRunId
+                ? {
+                    ...nodeRun,
+                    status: failed ? "failed" : "completed",
+                    ...(failed
+                      ? { error: event.payload.error }
+                      : event.payload.output !== undefined
+                        ? { output: event.payload.output, error: null }
+                        : { error: null }),
+                    completedAt,
+                    updatedAt: completedAt,
+                  }
+                : nodeRun,
+            ),
+          },
+        },
+      };
+    }
+
+    case "workflow.definition-patch-requested":
+      return state;
   }
 
   return state;
@@ -1693,6 +1843,36 @@ function applyEnvironmentShellEvent(
       return writeThreadShellState(state, mapThreadShell(event.thread, environmentId));
     case "thread-removed":
       return removeThreadState(state, event.threadId);
+    case "workflow-upserted":
+      return {
+        ...state,
+        workflowIds: (state.workflowIds ?? []).includes(event.workflow.id)
+          ? (state.workflowIds ?? [])
+          : [...(state.workflowIds ?? []), event.workflow.id],
+        workflowById: {
+          ...(state.workflowById ?? {}),
+          [event.workflow.id]: event.workflow,
+        },
+      };
+    case "workflow-removed": {
+      const { [event.workflowId]: _removedWorkflow, ...workflowById } = state.workflowById ?? {};
+      return {
+        ...state,
+        workflowIds: removeId(state.workflowIds ?? [], event.workflowId),
+        workflowById,
+      };
+    }
+    case "workflow-run-upserted":
+      return {
+        ...state,
+        workflowRunIds: (state.workflowRunIds ?? []).includes(event.run.id)
+          ? (state.workflowRunIds ?? [])
+          : [...(state.workflowRunIds ?? []), event.run.id],
+        workflowRunById: {
+          ...(state.workflowRunById ?? {}),
+          [event.run.id]: event.run,
+        },
+      };
   }
 }
 
@@ -1808,6 +1988,28 @@ export function selectProjectByRef(
   return ref
     ? selectEnvironmentState(state, ref.environmentId).projectById[ref.projectId]
     : undefined;
+}
+
+export function selectWorkflowsByEnvironment(
+  state: AppState,
+  environmentId: EnvironmentId | null | undefined,
+): WorkflowDefinition[] {
+  const environment = selectEnvironmentState(state, environmentId);
+  return (environment.workflowIds ?? [])
+    .map((workflowId) => environment.workflowById?.[workflowId])
+    .filter((workflow): workflow is WorkflowDefinition => workflow !== undefined);
+}
+
+export function selectWorkflowRunsByWorkflow(
+  state: AppState,
+  environmentId: EnvironmentId | null | undefined,
+  workflowId: WorkflowId | null | undefined,
+): WorkflowRun[] {
+  if (!workflowId) return [];
+  const environment = selectEnvironmentState(state, environmentId);
+  return (environment.workflowRunIds ?? [])
+    .map((runId) => environment.workflowRunById?.[runId])
+    .filter((run): run is WorkflowRun => run !== undefined && run.workflowId === workflowId);
 }
 
 export function selectThreadByRef(

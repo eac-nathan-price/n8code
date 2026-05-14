@@ -15,6 +15,10 @@ import {
   requireThreadArchived,
   requireThreadAbsent,
   requireThreadNotArchived,
+  requireWorkflow,
+  requireWorkflowAbsent,
+  requireWorkflowRun,
+  requireWorkflowRunAbsent,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
 
@@ -728,6 +732,298 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           activity: command.activity,
+        },
+      };
+    }
+
+    case "workflow.create": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.workflow.projectId,
+      });
+      yield* requireWorkflowAbsent({
+        readModel,
+        command,
+        workflowId: command.workflow.id,
+      });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflow",
+          aggregateId: command.workflow.id,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.created",
+        payload: {
+          workflow: {
+            ...command.workflow,
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+            deletedAt: null,
+          },
+        },
+      };
+    }
+
+    case "workflow.update": {
+      const workflow = yield* requireWorkflow({
+        readModel,
+        command,
+        workflowId: command.workflowId,
+      });
+      if (command.expectedVersion !== undefined && command.expectedVersion !== workflow.version) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Workflow '${command.workflowId}' version mismatch. Expected ${command.expectedVersion}, found ${workflow.version}.`,
+        });
+      }
+      return {
+        ...withEventBase({
+          aggregateKind: "workflow",
+          aggregateId: command.workflowId,
+          occurredAt: command.updatedAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.updated",
+        payload: {
+          workflow: {
+            ...workflow,
+            ...(command.title !== undefined ? { title: command.title } : {}),
+            ...(command.description !== undefined ? { description: command.description } : {}),
+            ...(command.defaultModelSelection !== undefined
+              ? { defaultModelSelection: command.defaultModelSelection }
+              : {}),
+            ...(command.nodes !== undefined ? { nodes: command.nodes } : {}),
+            ...(command.edges !== undefined ? { edges: command.edges } : {}),
+            version: workflow.version + 1,
+            updatedAt: command.updatedAt,
+          },
+        },
+      };
+    }
+
+    case "workflow.delete": {
+      yield* requireWorkflow({
+        readModel,
+        command,
+        workflowId: command.workflowId,
+      });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflow",
+          aggregateId: command.workflowId,
+          occurredAt: command.deletedAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.deleted",
+        payload: {
+          workflowId: command.workflowId,
+          deletedAt: command.deletedAt,
+        },
+      };
+    }
+
+    case "workflow.run.start": {
+      const workflow = yield* requireWorkflow({
+        readModel,
+        command,
+        workflowId: command.workflowId,
+      });
+      yield* requireWorkflowRunAbsent({
+        readModel,
+        command,
+        workflowRunId: command.workflowRunId,
+      });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflowRun",
+          aggregateId: command.workflowRunId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.run-started",
+        payload: {
+          run: {
+            id: command.workflowRunId,
+            workflowId: command.workflowId,
+            projectId: workflow.projectId,
+            status: "running",
+            goal: command.goal,
+            inputs: command.inputs,
+            nodeRuns: workflow.nodes.map((node) => ({
+              id: `${command.workflowRunId}:${node.id}` as never,
+              workflowRunId: command.workflowRunId,
+              nodeId: node.id,
+              status: "pending" as const,
+              threadId: null,
+              parentNodeRunId: null,
+              error: null,
+              startedAt: null,
+              completedAt: null,
+              updatedAt: command.createdAt,
+            })),
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+            completedAt: null,
+          },
+        },
+      };
+    }
+
+    case "workflow.run.pause": {
+      yield* requireWorkflowRun({ readModel, command, workflowRunId: command.workflowRunId });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflowRun",
+          aggregateId: command.workflowRunId,
+          occurredAt: command.updatedAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.run-paused",
+        payload: {
+          workflowRunId: command.workflowRunId,
+          updatedAt: command.updatedAt,
+        },
+      };
+    }
+
+    case "workflow.run.resume": {
+      yield* requireWorkflowRun({ readModel, command, workflowRunId: command.workflowRunId });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflowRun",
+          aggregateId: command.workflowRunId,
+          occurredAt: command.updatedAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.run-resumed",
+        payload: {
+          workflowRunId: command.workflowRunId,
+          updatedAt: command.updatedAt,
+        },
+      };
+    }
+
+    case "workflow.run.stop": {
+      yield* requireWorkflowRun({ readModel, command, workflowRunId: command.workflowRunId });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflowRun",
+          aggregateId: command.workflowRunId,
+          occurredAt: command.updatedAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.run-stopping",
+        payload: {
+          workflowRunId: command.workflowRunId,
+          updatedAt: command.updatedAt,
+        },
+      };
+    }
+
+    case "workflow.node-run.start": {
+      yield* requireWorkflowRun({ readModel, command, workflowRunId: command.workflowRunId });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflowRun",
+          aggregateId: command.workflowRunId,
+          occurredAt: command.startedAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.node-run-started",
+        payload: {
+          nodeRun: {
+            id: command.nodeRunId,
+            workflowRunId: command.workflowRunId,
+            nodeId: command.nodeId,
+            status: "running",
+            threadId: command.threadId ?? null,
+            parentNodeRunId: command.parentNodeRunId ?? null,
+            ...(command.item !== undefined ? { item: command.item } : {}),
+            error: null,
+            startedAt: command.startedAt,
+            completedAt: null,
+            updatedAt: command.startedAt,
+          },
+        },
+      };
+    }
+
+    case "workflow.node-run.complete": {
+      yield* requireWorkflowRun({ readModel, command, workflowRunId: command.workflowRunId });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflowRun",
+          aggregateId: command.workflowRunId,
+          occurredAt: command.completedAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.node-run-completed",
+        payload: {
+          workflowRunId: command.workflowRunId,
+          nodeRunId: command.nodeRunId,
+          ...(command.output !== undefined ? { output: command.output } : {}),
+          completedAt: command.completedAt,
+        },
+      };
+    }
+
+    case "workflow.node-run.fail": {
+      yield* requireWorkflowRun({ readModel, command, workflowRunId: command.workflowRunId });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflowRun",
+          aggregateId: command.workflowRunId,
+          occurredAt: command.completedAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.node-run-failed",
+        payload: {
+          workflowRunId: command.workflowRunId,
+          nodeRunId: command.nodeRunId,
+          error: command.error,
+          completedAt: command.completedAt,
+        },
+      };
+    }
+
+    case "workflow.run.complete": {
+      yield* requireWorkflowRun({ readModel, command, workflowRunId: command.workflowRunId });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflowRun",
+          aggregateId: command.workflowRunId,
+          occurredAt: command.completedAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.run-completed",
+        payload: {
+          workflowRunId: command.workflowRunId,
+          status: command.status,
+          completedAt: command.completedAt,
+        },
+      };
+    }
+
+    case "workflow.definition.patch.request": {
+      yield* requireWorkflow({
+        readModel,
+        command,
+        workflowId: command.workflowId,
+      });
+      return {
+        ...withEventBase({
+          aggregateKind: "workflow",
+          aggregateId: command.workflowId,
+          occurredAt: command.requestedAt,
+          commandId: command.commandId,
+        }),
+        type: "workflow.definition-patch-requested",
+        payload: {
+          workflowId: command.workflowId,
+          patch: command.patch,
+          requestedAt: command.requestedAt,
         },
       };
     }

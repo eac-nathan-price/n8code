@@ -1,4 +1,10 @@
-import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
+import type {
+  OrchestrationEvent,
+  OrchestrationReadModel,
+  ThreadId,
+  WorkflowRun,
+  WorkflowRunId,
+} from "@t3tools/contracts";
 import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -26,6 +32,17 @@ import {
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
   ThreadTurnDiffCompletedPayload,
+  WorkflowCreatedPayload,
+  WorkflowDeletedPayload,
+  WorkflowNodeRunCompletedPayload,
+  WorkflowNodeRunFailedPayload,
+  WorkflowNodeRunStartedPayload,
+  WorkflowRunCompletedPayload,
+  WorkflowRunPausedPayload,
+  WorkflowRunResumedPayload,
+  WorkflowRunStartedPayload,
+  WorkflowRunStoppingPayload,
+  WorkflowUpdatedPayload,
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
@@ -160,8 +177,18 @@ export function createEmptyReadModel(nowIso: string): OrchestrationReadModel {
     snapshotSequence: 0,
     projects: [],
     threads: [],
+    workflows: [],
+    workflowRuns: [],
     updatedAt: nowIso,
   };
+}
+
+function updateWorkflowRun(
+  runs: ReadonlyArray<WorkflowRun>,
+  workflowRunId: WorkflowRunId,
+  patch: Partial<Omit<WorkflowRun, "id" | "workflowId" | "projectId" | "createdAt">>,
+): WorkflowRun[] {
+  return runs.map((run) => (run.id === workflowRunId ? { ...run, ...patch } : run));
 }
 
 export function projectEvent(
@@ -646,6 +673,196 @@ export function projectEvent(
             }),
           };
         }),
+      );
+
+    case "workflow.created":
+      return decodeForEvent(WorkflowCreatedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const workflows = nextBase.workflows ?? [];
+          const existing = workflows.find((entry) => entry.id === payload.workflow.id);
+          return {
+            ...nextBase,
+            workflows: existing
+              ? workflows.map((entry) =>
+                  entry.id === payload.workflow.id ? payload.workflow : entry,
+                )
+              : [...workflows, payload.workflow],
+          };
+        }),
+      );
+
+    case "workflow.updated":
+      return decodeForEvent(WorkflowUpdatedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          workflows: (nextBase.workflows ?? []).map((workflow) =>
+            workflow.id === payload.workflow.id ? payload.workflow : workflow,
+          ),
+        })),
+      );
+
+    case "workflow.deleted":
+      return decodeForEvent(WorkflowDeletedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          workflows: (nextBase.workflows ?? []).map((workflow) =>
+            workflow.id === payload.workflowId
+              ? {
+                  ...workflow,
+                  deletedAt: payload.deletedAt,
+                  updatedAt: payload.deletedAt,
+                }
+              : workflow,
+          ),
+        })),
+      );
+
+    case "workflow.run-started":
+      return decodeForEvent(WorkflowRunStartedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const workflowRuns = nextBase.workflowRuns ?? [];
+          const existing = workflowRuns.find((entry) => entry.id === payload.run.id);
+          return {
+            ...nextBase,
+            workflowRuns: existing
+              ? workflowRuns.map((entry) => (entry.id === payload.run.id ? payload.run : entry))
+              : [...workflowRuns, payload.run],
+          };
+        }),
+      );
+
+    case "workflow.run-paused":
+      return decodeForEvent(WorkflowRunPausedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          workflowRuns: updateWorkflowRun(nextBase.workflowRuns ?? [], payload.workflowRunId, {
+            status: "paused",
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "workflow.run-resumed":
+      return decodeForEvent(WorkflowRunResumedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          workflowRuns: updateWorkflowRun(nextBase.workflowRuns ?? [], payload.workflowRunId, {
+            status: "running",
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "workflow.run-stopping":
+      return decodeForEvent(WorkflowRunStoppingPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          workflowRuns: updateWorkflowRun(nextBase.workflowRuns ?? [], payload.workflowRunId, {
+            status: "stopping",
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "workflow.run-completed":
+      return decodeForEvent(WorkflowRunCompletedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          workflowRuns: updateWorkflowRun(nextBase.workflowRuns ?? [], payload.workflowRunId, {
+            status: payload.status,
+            completedAt: payload.completedAt,
+            updatedAt: payload.completedAt,
+          }),
+        })),
+      );
+
+    case "workflow.node-run-started":
+      return decodeForEvent(
+        WorkflowNodeRunStartedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          workflowRuns: (nextBase.workflowRuns ?? []).map((run) =>
+            run.id === payload.nodeRun.workflowRunId
+              ? {
+                  ...run,
+                  nodeRuns: [
+                    ...run.nodeRuns.filter((nodeRun) => nodeRun.id !== payload.nodeRun.id),
+                    payload.nodeRun,
+                  ],
+                  updatedAt: payload.nodeRun.updatedAt,
+                }
+              : run,
+          ),
+        })),
+      );
+
+    case "workflow.node-run-completed":
+      return decodeForEvent(
+        WorkflowNodeRunCompletedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          workflowRuns: (nextBase.workflowRuns ?? []).map((run) =>
+            run.id === payload.workflowRunId
+              ? {
+                  ...run,
+                  nodeRuns: run.nodeRuns.map((nodeRun) =>
+                    nodeRun.id === payload.nodeRunId
+                      ? {
+                          ...nodeRun,
+                          status: "completed",
+                          ...(payload.output !== undefined ? { output: payload.output } : {}),
+                          error: null,
+                          completedAt: payload.completedAt,
+                          updatedAt: payload.completedAt,
+                        }
+                      : nodeRun,
+                  ),
+                  updatedAt: payload.completedAt,
+                }
+              : run,
+          ),
+        })),
+      );
+
+    case "workflow.node-run-failed":
+      return decodeForEvent(
+        WorkflowNodeRunFailedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          workflowRuns: (nextBase.workflowRuns ?? []).map((run) =>
+            run.id === payload.workflowRunId
+              ? {
+                  ...run,
+                  nodeRuns: run.nodeRuns.map((nodeRun) =>
+                    nodeRun.id === payload.nodeRunId
+                      ? {
+                          ...nodeRun,
+                          status: "failed",
+                          error: payload.error,
+                          completedAt: payload.completedAt,
+                          updatedAt: payload.completedAt,
+                        }
+                      : nodeRun,
+                  ),
+                  status: "failed",
+                  updatedAt: payload.completedAt,
+                  completedAt: payload.completedAt,
+                }
+              : run,
+          ),
+        })),
       );
 
     default:

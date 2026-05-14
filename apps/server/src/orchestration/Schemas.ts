@@ -20,6 +20,18 @@ import {
   ThreadApprovalResponseRequestedPayload as ContractsThreadApprovalResponseRequestedPayloadSchema,
   ThreadCheckpointRevertRequestedPayload as ContractsThreadCheckpointRevertRequestedPayloadSchema,
   ThreadSessionStopRequestedPayload as ContractsThreadSessionStopRequestedPayloadSchema,
+  WorkflowCreatedPayload as ContractsWorkflowCreatedPayloadSchema,
+  WorkflowDeletedPayload as ContractsWorkflowDeletedPayloadSchema,
+  WorkflowDefinitionPatchRequestedPayload as ContractsWorkflowDefinitionPatchRequestedPayloadSchema,
+  WorkflowNodeRunCompletedPayload as ContractsWorkflowNodeRunCompletedPayloadSchema,
+  WorkflowNodeRunFailedPayload as ContractsWorkflowNodeRunFailedPayloadSchema,
+  WorkflowNodeRunStartedPayload as ContractsWorkflowNodeRunStartedPayloadSchema,
+  WorkflowRunCompletedPayload as ContractsWorkflowRunCompletedPayloadSchema,
+  WorkflowRunPausedPayload as ContractsWorkflowRunPausedPayloadSchema,
+  WorkflowRunResumedPayload as ContractsWorkflowRunResumedPayloadSchema,
+  WorkflowRunStartedPayload as ContractsWorkflowRunStartedPayloadSchema,
+  WorkflowRunStoppingPayload as ContractsWorkflowRunStoppingPayloadSchema,
+  WorkflowUpdatedPayload as ContractsWorkflowUpdatedPayloadSchema,
 } from "@t3tools/contracts";
 
 // Server-internal alias surface, backed by contract schemas as the source of truth.
@@ -50,3 +62,17 @@ export const ThreadApprovalResponseRequestedPayload =
 export const ThreadCheckpointRevertRequestedPayload =
   ContractsThreadCheckpointRevertRequestedPayloadSchema;
 export const ThreadSessionStopRequestedPayload = ContractsThreadSessionStopRequestedPayloadSchema;
+
+export const WorkflowCreatedPayload = ContractsWorkflowCreatedPayloadSchema;
+export const WorkflowUpdatedPayload = ContractsWorkflowUpdatedPayloadSchema;
+export const WorkflowDeletedPayload = ContractsWorkflowDeletedPayloadSchema;
+export const WorkflowRunStartedPayload = ContractsWorkflowRunStartedPayloadSchema;
+export const WorkflowRunPausedPayload = ContractsWorkflowRunPausedPayloadSchema;
+export const WorkflowRunResumedPayload = ContractsWorkflowRunResumedPayloadSchema;
+export const WorkflowRunStoppingPayload = ContractsWorkflowRunStoppingPayloadSchema;
+export const WorkflowRunCompletedPayload = ContractsWorkflowRunCompletedPayloadSchema;
+export const WorkflowNodeRunStartedPayload = ContractsWorkflowNodeRunStartedPayloadSchema;
+export const WorkflowNodeRunCompletedPayload = ContractsWorkflowNodeRunCompletedPayloadSchema;
+export const WorkflowNodeRunFailedPayload = ContractsWorkflowNodeRunFailedPayloadSchema;
+export const WorkflowDefinitionPatchRequestedPayload =
+  ContractsWorkflowDefinitionPatchRequestedPayloadSchema;
