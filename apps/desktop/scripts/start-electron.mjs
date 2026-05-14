@@ -1,8 +1,12 @@
 import { spawn } from "node:child_process";
 
-import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import {
+  applyLinuxDisplayLaunchEnvironment,
+  desktopDir,
+  resolveElectronPath,
+} from "./electron-launcher.mjs";
 
-const childEnv = { ...process.env };
+const childEnv = applyLinuxDisplayLaunchEnvironment({ ...process.env });
 delete childEnv.ELECTRON_RUN_AS_NODE;
 
 const child = spawn(resolveElectronPath(), ["dist-electron/main.cjs"], {

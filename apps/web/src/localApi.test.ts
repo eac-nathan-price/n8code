@@ -223,6 +223,7 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     pickFolder: async () => null,
     confirm: async () => true,
     setTheme: async () => undefined,
+    setUiScale: async () => undefined,
     showContextMenu: async () => null,
     openExternal: async () => true,
     onMenuAction: () => () => undefined,
@@ -615,6 +616,7 @@ describe("wsApi", () => {
       sidebarThreadSortOrder: "created_at" as const,
       sidebarThreadPreviewCount: 6,
       timestampFormat: "24-hour" as const,
+      uiScale: 150 as const,
     };
     const getClientSettings = vi.fn().mockResolvedValue({
       ...clientSettings,
@@ -678,6 +680,7 @@ describe("wsApi", () => {
       sidebarThreadSortOrder: "created_at" as const,
       sidebarThreadPreviewCount: 6,
       timestampFormat: "24-hour" as const,
+      uiScale: 150 as const,
     };
 
     await api.persistence.setClientSettings(clientSettings);

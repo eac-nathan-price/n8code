@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -17,6 +18,7 @@ import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
+import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 
 const environmentInput = {
@@ -143,6 +145,7 @@ function makeTestLayer(input: {
         desktopAssetsLayer,
         desktopEnvironmentLayer,
         desktopServerExposureLayer,
+        DesktopClientSettings.layerTest(),
         DesktopState.layer,
         electronMenuLayer,
         electronShellLayer,
@@ -154,6 +157,24 @@ function makeTestLayer(input: {
 }
 
 describe("DesktopWindow", () => {
+  it("uses 100% as the default zoom factor", () => {
+    assert.equal(
+      DesktopWindow.resolveWindowZoomFactor({
+        uiScale: DEFAULT_CLIENT_SETTINGS.uiScale,
+      }),
+      1,
+    );
+  });
+
+  it("converts UI scale percentages into Electron zoom factors", () => {
+    assert.equal(
+      DesktopWindow.resolveWindowZoomFactor({
+        uiScale: 175,
+      }),
+      1.75,
+    );
+  });
+
   it.effect("does not open a development window until the backend is ready", () =>
     Effect.gen(function* () {
       const fakeWindow = makeFakeBrowserWindow();

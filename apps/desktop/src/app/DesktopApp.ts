@@ -13,6 +13,7 @@ import { installDesktopIpcHandlers } from "../ipc/DesktopIpcHandlers.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
+import * as DesktopConfig from "./DesktopConfig.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
@@ -55,6 +56,40 @@ const { logInfo: logBootstrapInfo, logWarning: logBootstrapWarning } =
 
 const { logInfo: logStartupInfo, logError: logStartupError } =
   DesktopObservability.makeComponentLogger("desktop-startup");
+
+type ElectronCommandLineSwitch = readonly [switchName: string, value?: string];
+
+export function resolveLinuxDisplayCommandLineSwitches(input: {
+  readonly platform: NodeJS.Platform;
+  readonly waylandDisplay: Option.Option<string>;
+  readonly wslDistroName: Option.Option<string>;
+  readonly electronOzonePlatformHint: Option.Option<string>;
+  readonly desktopForceDeviceScaleFactor: Option.Option<string>;
+  readonly disableWslgWayland: boolean;
+}): readonly ElectronCommandLineSwitch[] {
+  const switches: ElectronCommandLineSwitch[] = [];
+
+  if (input.platform !== "linux") {
+    return switches;
+  }
+
+  if (Option.isSome(input.desktopForceDeviceScaleFactor)) {
+    switches.push(["force-device-scale-factor", input.desktopForceDeviceScaleFactor.value]);
+  }
+
+  const shouldPreferWslgWayland =
+    !input.disableWslgWayland &&
+    Option.isSome(input.waylandDisplay) &&
+    Option.isSome(input.wslDistroName) &&
+    Option.isNone(input.electronOzonePlatformHint);
+
+  if (shouldPreferWslgWayland) {
+    switches.push(["ozone-platform", "wayland"]);
+    switches.push(["enable-features", "UseOzonePlatform,WaylandWindowDecorations"]);
+  }
+
+  return switches;
+}
 
 const resolveDesktopBackendPort = Effect.fn("resolveDesktopBackendPort")(function* (
   configuredPort: Option.Option<number>,
@@ -193,6 +228,7 @@ const startup = Effect.gen(function* () {
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
   const updates = yield* DesktopUpdates.DesktopUpdates;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const desktopConfig = yield* DesktopConfig.DesktopConfig;
 
   yield* shellEnvironment.installIntoProcess;
   const userDataPath = yield* appIdentity.resolveUserDataPath;
@@ -201,6 +237,19 @@ const startup = Effect.gen(function* () {
   yield* desktopSettings.load;
 
   if (environment.platform === "linux") {
+    const displaySwitches = resolveLinuxDisplayCommandLineSwitches({
+      platform: environment.platform,
+      waylandDisplay: desktopConfig.waylandDisplay,
+      wslDistroName: desktopConfig.wslDistroName,
+      electronOzonePlatformHint: desktopConfig.electronOzonePlatformHint,
+      desktopForceDeviceScaleFactor: desktopConfig.desktopForceDeviceScaleFactor,
+      disableWslgWayland: desktopConfig.disableWslgWayland,
+    });
+
+    for (const [switchName, value] of displaySwitches) {
+      yield* electronApp.appendCommandLineSwitch(switchName, value);
+    }
+
     yield* electronApp.appendCommandLineSwitch("class", environment.linuxWmClass);
   }
 

@@ -20,12 +20,29 @@ const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const APP_DISPLAY_NAME = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
 const APP_BUNDLE_ID = isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code";
 const LAUNCHER_VERSION = 2;
+const DEFAULT_WSLG_CURSOR_SIZE = "24";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const desktopDir = resolve(__dirname, "..");
 const repoRoot = resolve(desktopDir, "..", "..");
 const defaultIconPath = join(desktopDir, "resources", "icon.icns");
 const developmentMacIconPngPath = join(repoRoot, "assets", "dev", "blueprint-macos-1024.png");
+
+export function applyLinuxDisplayLaunchEnvironment(env) {
+  if (process.platform !== "linux") {
+    return env;
+  }
+
+  if (!env.WSL_DISTRO_NAME || !env.WAYLAND_DISPLAY) {
+    return env;
+  }
+
+  const cursorSize = env.T3CODE_DESKTOP_CURSOR_SIZE?.trim() || DEFAULT_WSLG_CURSOR_SIZE;
+  return {
+    ...env,
+    XCURSOR_SIZE: env.XCURSOR_SIZE?.trim() || cursorSize,
+  };
+}
 
 function setPlistString(plistPath, key, value) {
   const replaceResult = spawnSync("plutil", ["-replace", key, "-string", value, plistPath], {

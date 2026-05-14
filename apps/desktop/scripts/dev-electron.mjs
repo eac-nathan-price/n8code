@@ -2,7 +2,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { watch } from "node:fs";
 import { join } from "node:path";
 
-import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import {
+  applyLinuxDisplayLaunchEnvironment,
+  desktopDir,
+  resolveElectronPath,
+} from "./electron-launcher.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim();
@@ -36,7 +40,7 @@ await waitForResources({
   tcpPort: port,
 });
 
-const childEnv = { ...process.env };
+const childEnv = applyLinuxDisplayLaunchEnvironment({ ...process.env });
 delete childEnv.ELECTRON_RUN_AS_NODE;
 
 let shuttingDown = false;

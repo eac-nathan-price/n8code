@@ -1,5 +1,5 @@
 import type { DesktopBridge } from "@t3tools/contracts";
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webFrame } from "electron";
 
 import * as IpcChannels from "./ipc/channels.ts";
 
@@ -90,6 +90,9 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   pickFolder: (options) => ipcRenderer.invoke(IpcChannels.PICK_FOLDER_CHANNEL, options),
   confirm: (message) => ipcRenderer.invoke(IpcChannels.CONFIRM_CHANNEL, message),
   setTheme: (theme) => ipcRenderer.invoke(IpcChannels.SET_THEME_CHANNEL, theme),
+  setUiScale: async (scale) => {
+    webFrame.setZoomFactor(scale / 100);
+  },
   showContextMenu: (items, position) =>
     ipcRenderer.invoke(IpcChannels.CONTEXT_MENU_CHANNEL, {
       items,

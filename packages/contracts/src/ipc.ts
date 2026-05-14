@@ -67,7 +67,7 @@ import { AuthBearerBootstrapResult, AuthSessionState, AuthWebSocketTokenResult }
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { EditorId } from "./editor.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
-import type { ClientSettings, ServerSettings, ServerSettingsPatch } from "./settings.ts";
+import type { ClientSettings, ServerSettings, ServerSettingsPatch, UiScale } from "./settings.ts";
 import type {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
@@ -409,6 +409,7 @@ export interface DesktopBridge {
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   confirm: (message: string) => Promise<boolean>;
   setTheme: (theme: DesktopTheme) => Promise<void>;
+  setUiScale: (scale: UiScale) => Promise<void>;
   showContextMenu: <T extends string>(
     items: readonly ContextMenuItem<T>[],
     position?: { x: number; y: number },

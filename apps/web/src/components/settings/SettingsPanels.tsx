@@ -12,7 +12,11 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime";
-import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  UI_SCALE_OPTIONS,
+  type UiScale,
+} from "@t3tools/contracts/settings";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
@@ -98,6 +102,10 @@ const TIMESTAMP_FORMAT_LABELS = {
   "12-hour": "12-hour",
   "24-hour": "24-hour",
 } as const;
+
+const UI_SCALE_LABELS = Object.fromEntries(
+  UI_SCALE_OPTIONS.map((scale) => [scale, `${scale}%`]),
+) as Record<UiScale, string>;
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 
@@ -393,6 +401,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
+      ...(settings.uiScale !== DEFAULT_UNIFIED_SETTINGS.uiScale ? ["UI scale"] : []),
       ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
         ? ["Visible threads"]
         : []),
@@ -439,6 +448,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.enableAssistantStreaming,
       settings.sidebarThreadPreviewCount,
       settings.timestampFormat,
+      settings.uiScale,
       theme,
     ],
   );
@@ -456,6 +466,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     setTheme("system");
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
+      uiScale: DEFAULT_UNIFIED_SETTINGS.uiScale,
       diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
@@ -587,6 +598,45 @@ export function GeneralSettingsPanel() {
                 <SelectItem hideIndicator value="24-hour">
                   {TIMESTAMP_FORMAT_LABELS["24-hour"]}
                 </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+
+        <SettingsRow
+          title="UI scale"
+          description="Resize the app interface. Changes apply immediately."
+          resetAction={
+            settings.uiScale !== DEFAULT_UNIFIED_SETTINGS.uiScale ? (
+              <SettingResetButton
+                label="UI scale"
+                onClick={() =>
+                  updateSettings({
+                    uiScale: DEFAULT_UNIFIED_SETTINGS.uiScale,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={String(settings.uiScale)}
+              onValueChange={(value) => {
+                const scale = Number(value);
+                if (UI_SCALE_OPTIONS.includes(scale as UiScale)) {
+                  updateSettings({ uiScale: scale as UiScale });
+                }
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-40" aria-label="UI scale">
+                <SelectValue>{UI_SCALE_LABELS[settings.uiScale]}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                {UI_SCALE_OPTIONS.map((scale) => (
+                  <SelectItem hideIndicator key={scale} value={String(scale)}>
+                    {UI_SCALE_LABELS[scale]}
+                  </SelectItem>
+                ))}
               </SelectPopup>
             </Select>
           }

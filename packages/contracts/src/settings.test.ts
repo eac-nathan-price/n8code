@@ -2,11 +2,35 @@ import { describe, expect, it } from "vitest";
 import * as Schema from "effect/Schema";
 
 import { ProviderInstanceId } from "./providerInstance.ts";
-import { DEFAULT_SERVER_SETTINGS, ServerSettings, ServerSettingsPatch } from "./settings.ts";
+import {
+  ClientSettingsPatch,
+  ClientSettingsSchema,
+  DEFAULT_CLIENT_SETTINGS,
+  DEFAULT_SERVER_SETTINGS,
+  ServerSettings,
+  ServerSettingsPatch,
+} from "./settings.ts";
 
+const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
+const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
+
+describe("ClientSettings.uiScale", () => {
+  it("defaults UI scale to 100%", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.uiScale).toBe(100);
+    expect(decodeClientSettings({}).uiScale).toBe(100);
+  });
+
+  it("accepts supported UI scale patch values", () => {
+    expect(decodeClientSettingsPatch({ uiScale: 175 }).uiScale).toBe(175);
+  });
+
+  it("rejects unsupported UI scale values", () => {
+    expect(() => decodeClientSettingsPatch({ uiScale: 110 })).toThrow();
+  });
+});
 
 describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("defaults to an empty record so legacy configs without the key still decode", () => {

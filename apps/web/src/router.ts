@@ -4,6 +4,7 @@ import { createRouter, RouterHistory } from "@tanstack/react-router";
 
 import { AppAtomRegistryProvider } from "./rpc/atomRegistry";
 import { routeTree } from "./routeTree.gen";
+import { UiScaleSynchronizer } from "./hooks/useUiScale";
 
 export function getRouter(history: RouterHistory) {
   const queryClient = new QueryClient();
@@ -18,7 +19,12 @@ export function getRouter(history: RouterHistory) {
       createElement(
         QueryClientProvider,
         { client: queryClient },
-        createElement(AppAtomRegistryProvider, undefined, children),
+        createElement(
+          AppAtomRegistryProvider,
+          undefined,
+          createElement(UiScaleSynchronizer),
+          children,
+        ),
       ),
   });
 }

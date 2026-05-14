@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import type * as Electron from "electron";
+import { DEFAULT_UI_SCALE, type UiScale } from "@t3tools/contracts/settings";
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -17,6 +18,7 @@ import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
+import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 
 const TITLEBAR_HEIGHT = 40;
 const TITLEBAR_COLOR = "#01000000"; // #00000000 does not work correctly on Linux
@@ -110,6 +112,10 @@ function getWindowTitleBarOptions(shouldUseDarkColors: boolean): WindowTitleBarO
   };
 }
 
+export function resolveWindowZoomFactor(input: { readonly uiScale: UiScale }): number {
+  return input.uiScale / 100;
+}
+
 function syncWindowAppearance(
   window: Electron.BrowserWindow,
   shouldUseDarkColors: boolean,
@@ -146,6 +152,7 @@ function bindFirstRevealTrigger(
 
 const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;
   const assets = yield* DesktopAssets.DesktopAssets;
   const electronMenu = yield* ElectronMenu.ElectronMenu;
   const electronShell = yield* ElectronShell.ElectronShell;
@@ -162,6 +169,13 @@ const make = Effect.gen(function* () {
     const iconPaths = yield* assets.iconPaths;
     const iconOption = getIconOption(iconPaths);
     const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+    const persistedClientSettings = yield* clientSettings.get;
+    const zoomFactor = resolveWindowZoomFactor({
+      uiScale: Option.match(persistedClientSettings, {
+        onNone: () => DEFAULT_UI_SCALE,
+        onSome: (settings) => settings.uiScale,
+      }),
+    });
     const window = yield* electronWindow.create({
       width: 1100,
       height: 780,
@@ -178,6 +192,7 @@ const make = Effect.gen(function* () {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        zoomFactor,
       },
     });
 

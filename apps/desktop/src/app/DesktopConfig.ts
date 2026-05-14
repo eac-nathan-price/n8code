@@ -46,6 +46,11 @@ export const DesktopConfig = Config.all({
   otlpExportIntervalMs: Config.int("T3CODE_OTLP_EXPORT_INTERVAL_MS").pipe(
     Config.withDefault(10_000),
   ),
+  waylandDisplay: trimmedString("WAYLAND_DISPLAY"),
+  wslDistroName: trimmedString("WSL_DISTRO_NAME"),
+  electronOzonePlatformHint: trimmedString("ELECTRON_OZONE_PLATFORM_HINT"),
+  desktopForceDeviceScaleFactor: trimmedString("T3CODE_DESKTOP_FORCE_DEVICE_SCALE_FACTOR"),
+  disableWslgWayland: optionalBoolean("T3CODE_DISABLE_WSLG_WAYLAND"),
   appImagePath: trimmedString("APPIMAGE"),
   disableAutoUpdate: optionalBoolean("T3CODE_DISABLE_AUTO_UPDATE"),
   mockUpdates: optionalBoolean("T3CODE_DESKTOP_MOCK_UPDATES"),
