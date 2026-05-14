@@ -5,7 +5,9 @@ import {
   type ClientOrchestrationCommand,
   CommandId,
   type EnvironmentId,
+  type ModelSelection,
   type ProjectId,
+  type ProviderInstanceId,
   ThreadId,
   type WorkflowDefinition,
   WorkflowEdgeId,
@@ -15,16 +17,14 @@ import {
   WorkflowRunId,
   type WorkflowRun,
 } from "@t3tools/contracts";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { readEnvironmentConnection } from "~/environments/runtime";
-import {
-  selectProjectByRef,
-  selectThreadByRef,
-  selectWorkflowRunsByWorkflow,
-  selectWorkflowsByEnvironment,
-  useStore,
-} from "~/store";
+import { useSettings } from "~/hooks/useSettings";
+import { getAppModelOptionsForInstance } from "~/modelSelection";
+import { deriveProviderInstanceEntries, sortProviderInstanceEntries } from "~/providerInstances";
+import { useServerProviders } from "~/rpc/serverState";
+import { selectEnvironmentState, useStore } from "~/store";
 import { cn } from "~/lib/utils";
 
 function id(prefix: string): string {
@@ -145,39 +145,120 @@ function latestRunForWorkflow(runs: WorkflowRun[]): WorkflowRun | null {
   return runs.toSorted((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
 }
 
+function modelSelectionKey(selection: ModelSelection): string {
+  return `${selection.instanceId}\u0000${selection.model}`;
+}
+
+function parseModelSelectionKey(value: string): ModelSelection | null {
+  const separatorIndex = value.indexOf("\u0000");
+  if (separatorIndex <= 0) return null;
+  const instanceId = value.slice(0, separatorIndex) as ProviderInstanceId;
+  const model = value.slice(separatorIndex + 1).trim();
+  return model.length > 0 ? { instanceId, model } : null;
+}
+
+function modelSelectionLabel(selection: ModelSelection | null): string {
+  return selection ? `${selection.instanceId} / ${selection.model}` : "None";
+}
+
+function ModelSelectionSelect(props: {
+  readonly label: string;
+  readonly value: ModelSelection | null;
+  readonly inheritLabel: string;
+  readonly onChange: (selection: ModelSelection | null) => void;
+}) {
+  const providers = useServerProviders();
+  const settings = useSettings();
+  const options = useMemo(() => {
+    const entries = sortProviderInstanceEntries(deriveProviderInstanceEntries(providers)).filter(
+      (entry) => entry.enabled && entry.status === "ready",
+    );
+    return entries.flatMap((entry) =>
+      getAppModelOptionsForInstance(settings, entry).map((model) => ({
+        key: modelSelectionKey({ instanceId: entry.instanceId, model: model.slug }),
+        instanceId: entry.instanceId,
+        instanceLabel: entry.displayName,
+        model: model.slug,
+        modelLabel: model.shortName ?? model.name,
+      })),
+    );
+  }, [providers, settings]);
+
+  return (
+    <label className="block space-y-1 text-xs">
+      <span className="font-medium text-muted-foreground">{props.label}</span>
+      <select
+        className="w-full rounded-md border border-border bg-background px-2 py-1 text-sm"
+        value={props.value ? modelSelectionKey(props.value) : ""}
+        onChange={(event) => props.onChange(parseModelSelectionKey(event.target.value))}
+      >
+        <option value="">{props.inheritLabel}</option>
+        {options.map((option) => (
+          <option key={option.key} value={option.key}>
+            {option.instanceLabel}: {option.modelLabel}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 export function OrchestrationPanel(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly mode: "sidebar" | "sheet";
 }) {
-  const thread = useStore((state) =>
-    selectThreadByRef(state, { environmentId: props.environmentId, threadId: props.threadId }),
+  const environmentState = useStore((state) => selectEnvironmentState(state, props.environmentId));
+  const threadShell = environmentState.threadShellById[props.threadId];
+  const project = threadShell ? environmentState.projectById[threadShell.projectId] : undefined;
+  const latestMessageText = useMemo(() => {
+    const messageIds = environmentState.messageIdsByThreadId[props.threadId] ?? [];
+    const latestMessageId = messageIds.at(-1);
+    return latestMessageId
+      ? environmentState.messageByThreadId[props.threadId]?.[latestMessageId]?.text
+      : undefined;
+  }, [environmentState, props.threadId]);
+  const workflows = useMemo(
+    () =>
+      (environmentState.workflowIds ?? [])
+        .map((workflowId) => environmentState.workflowById?.[workflowId])
+        .filter((workflow): workflow is WorkflowDefinition => workflow !== undefined),
+    [environmentState],
   );
-  const project = useStore((state) =>
-    thread
-      ? selectProjectByRef(state, {
-          environmentId: props.environmentId,
-          projectId: thread.projectId,
-        })
-      : undefined,
-  );
-  const workflows = useStore((state) => selectWorkflowsByEnvironment(state, props.environmentId));
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
   const workflow =
     workflows.find((entry) => entry.id === selectedWorkflowId) ?? workflows[0] ?? null;
-  const runs = useStore((state) =>
-    selectWorkflowRunsByWorkflow(state, props.environmentId, workflow?.id ?? null),
+  const runs = useMemo(
+    () =>
+      workflow
+        ? (environmentState.workflowRunIds ?? [])
+            .map((runId) => environmentState.workflowRunById?.[runId])
+            .filter(
+              (run): run is WorkflowRun => run !== undefined && run.workflowId === workflow.id,
+            )
+        : [],
+    [environmentState, workflow],
   );
   const latestRun = latestRunForWorkflow(runs);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const selectedNode = workflow?.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const [promptDraft, setPromptDraft] = useState("");
   const [goal, setGoal] = useState("");
+
+  useEffect(() => {
+    setPromptDraft(selectedNode?.config.promptTemplate ?? "");
+  }, [selectedNode?.id, selectedNode?.config.promptTemplate]);
 
   const graph = useMemo(() => {
     const nodeRuns = new Map(latestRun?.nodeRuns.map((run) => [run.nodeId, run]) ?? []);
     const nodes: Node[] =
       workflow?.nodes.map((node) => {
         const run = nodeRuns.get(node.id);
+        const effectiveModel =
+          node.config.modelSelection ??
+          workflow.defaultModelSelection ??
+          project?.defaultModelSelection ??
+          null;
         return {
           id: node.id,
           position: node.position,
@@ -187,6 +268,9 @@ export function OrchestrationPanel(props: {
                 <div className="text-xs uppercase text-muted-foreground">{node.kind}</div>
                 <div className="font-medium">{node.title}</div>
                 <div className="mt-1 text-xs text-muted-foreground">{run?.status ?? "not run"}</div>
+                <div className="mt-1 max-w-44 truncate text-[0.7rem] text-muted-foreground">
+                  {modelSelectionLabel(effectiveModel)}
+                </div>
               </div>
             ),
           },
@@ -207,7 +291,7 @@ export function OrchestrationPanel(props: {
         animated: latestRun?.status === "running",
       })) ?? [];
     return { nodes, edges };
-  }, [latestRun, workflow]);
+  }, [latestRun, project?.defaultModelSelection, workflow]);
 
   const dispatch = async (command: ClientOrchestrationCommand) => {
     const connection = readEnvironmentConnection(props.environmentId);
@@ -232,6 +316,32 @@ export function OrchestrationPanel(props: {
     setSelectedWorkflowId(workflow.id);
   };
 
+  const updateWorkflow = async (
+    patch: Pick<
+      Extract<ClientOrchestrationCommand, { type: "workflow.update" }>,
+      "defaultModelSelection" | "nodes"
+    >,
+  ) => {
+    if (!workflow) return;
+    await dispatch({
+      type: "workflow.update",
+      commandId: CommandId.make(id("client:workflow-update")),
+      workflowId: workflow.id,
+      expectedVersion: workflow.version,
+      updatedAt: new Date().toISOString(),
+      ...patch,
+    });
+  };
+
+  const updateSelectedNode = async (
+    update: (node: WorkflowNodeDefinition) => WorkflowNodeDefinition,
+  ) => {
+    if (!workflow || !selectedNode) return;
+    await updateWorkflow({
+      nodes: workflow.nodes.map((node) => (node.id === selectedNode.id ? update(node) : node)),
+    });
+  };
+
   const runWorkflow = async () => {
     if (!workflow) return;
     const now = new Date().toISOString();
@@ -240,7 +350,7 @@ export function OrchestrationPanel(props: {
       commandId: CommandId.make(id("client:workflow-run-start")),
       workflowRunId: WorkflowRunId.make(id("workflow-run")),
       workflowId: workflow.id,
-      goal: goal.trim() || thread?.messages.at(-1)?.text || workflow.title,
+      goal: goal.trim() || latestMessageText || workflow.title,
       inputs: {},
       createdAt: now,
     });
@@ -308,6 +418,16 @@ export function OrchestrationPanel(props: {
           value={goal}
           onChange={(event) => setGoal(event.target.value)}
         />
+        {workflow ? (
+          <div className="mt-2">
+            <ModelSelectionSelect
+              label="Workflow default model"
+              value={workflow.defaultModelSelection}
+              inheritLabel={`Use project default (${modelSelectionLabel(project?.defaultModelSelection ?? null)})`}
+              onChange={(selection) => void updateWorkflow({ defaultModelSelection: selection })}
+            />
+          </div>
+        ) : null}
       </div>
       <div className="min-h-0 flex-1">
         {workflow ? (
@@ -332,9 +452,46 @@ export function OrchestrationPanel(props: {
           <div className="space-y-2">
             <div className="font-medium">{selectedNode.title}</div>
             <div className="text-xs uppercase text-muted-foreground">{selectedNode.kind}</div>
-            <pre className="whitespace-pre-wrap rounded-md bg-muted p-2 text-xs">
-              {selectedNode.config.promptTemplate || "(no prompt)"}
-            </pre>
+            <ModelSelectionSelect
+              label="Node model"
+              value={selectedNode.config.modelSelection ?? null}
+              inheritLabel={`Inherit workflow default (${modelSelectionLabel(
+                workflow?.defaultModelSelection ?? project?.defaultModelSelection ?? null,
+              )})`}
+              onChange={(selection) =>
+                void updateSelectedNode((node) => ({
+                  ...node,
+                  config: {
+                    ...node.config,
+                    modelSelection: selection,
+                  },
+                }))
+              }
+            />
+            <label className="block space-y-1 text-xs">
+              <span className="font-medium text-muted-foreground">Prompt</span>
+              <textarea
+                className="h-24 w-full resize-none rounded-md border border-border bg-background p-2 text-xs"
+                value={promptDraft}
+                onChange={(event) => setPromptDraft(event.target.value)}
+              />
+            </label>
+            <button
+              type="button"
+              className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-50"
+              disabled={promptDraft === selectedNode.config.promptTemplate}
+              onClick={() =>
+                void updateSelectedNode((node) => ({
+                  ...node,
+                  config: {
+                    ...node.config,
+                    promptTemplate: promptDraft,
+                  },
+                }))
+              }
+            >
+              Save Prompt
+            </button>
           </div>
         ) : (
           <div className="text-muted-foreground">
