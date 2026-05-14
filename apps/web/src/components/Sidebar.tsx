@@ -102,7 +102,7 @@ import {
   resolveThreadRouteRef,
   resolveThreadRouteTarget,
 } from "../threadRoutes";
-import { buildWorkflowRouteParams, resolveWorkflowRouteRef } from "../workflowRoutes";
+import { buildWorkflowRouteParams } from "../workflowRoutes";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
@@ -1249,18 +1249,27 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     useShallow(
       useMemo(
         () =>
-          (state: import("../store").AppState): SidebarWorkflow[] =>
+          (state: import("../store").AppState): WorkflowDefinition[] =>
             project.memberProjectRefs.flatMap((projectRef) =>
-              selectWorkflowsByEnvironment(state, projectRef.environmentId)
-                .filter((workflow) => workflow.projectId === projectRef.projectId)
-                .map((workflow) =>
-                  Object.assign({}, workflow, { environmentId: projectRef.environmentId }),
-                ),
+              selectWorkflowsByEnvironment(state, projectRef.environmentId).filter(
+                (workflow) => workflow.projectId === projectRef.projectId,
+              ),
             ),
         [project.memberProjectRefs],
       ),
     ),
   );
+  const projectWorkflowEnvironmentIdById = useMemo(() => {
+    const mapping = new Map<WorkflowDefinition["id"], EnvironmentId>();
+    for (const projectRef of project.memberProjectRefs) {
+      for (const workflow of projectWorkflows) {
+        if (workflow.projectId === projectRef.projectId && !mapping.has(workflow.id)) {
+          mapping.set(workflow.id, projectRef.environmentId);
+        }
+      }
+    }
+    return mapping;
+  }, [project.memberProjectRefs, projectWorkflows]);
   const sidebarThreadByKey = useMemo(
     () =>
       new Map(
@@ -1380,6 +1389,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         ),
     [projectWorkflows],
   );
+  const visibleProjectSidebarWorkflows = useMemo(
+    () =>
+      visibleProjectWorkflows.flatMap((workflow) => {
+        const environmentId = projectWorkflowEnvironmentIdById.get(workflow.id);
+        return environmentId ? [Object.assign({}, workflow, { environmentId })] : [];
+      }),
+    [projectWorkflowEnvironmentIdById, visibleProjectWorkflows],
+  );
 
   const pinnedCollapsedThread = useMemo(() => {
     const activeThreadKey = activeRouteThreadKey ?? undefined;
@@ -1399,11 +1416,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       return null;
     }
     return (
-      visibleProjectWorkflows.find(
+      visibleProjectSidebarWorkflows.find(
         (workflow) => workflowSidebarKey(workflow) === activeWorkflowKey,
       ) ?? null
     );
-  }, [activeRouteWorkflowKey, projectExpanded, visibleProjectWorkflows]);
+  }, [activeRouteWorkflowKey, projectExpanded, visibleProjectSidebarWorkflows]);
 
   const {
     hasOverflowingThreads,
@@ -1457,7 +1474,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       showEmptyThreadState:
         projectExpanded &&
         visibleProjectThreads.length === 0 &&
-        visibleProjectWorkflows.length === 0,
+        visibleProjectSidebarWorkflows.length === 0,
       shouldShowThreadPanel:
         projectExpanded || pinnedCollapsedThread !== null || pinnedCollapsedWorkflow !== null,
     };
@@ -1470,7 +1487,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     sidebarThreadPreviewCount,
     threadLastVisitedAts,
     visibleProjectThreads,
-    visibleProjectWorkflows.length,
+    visibleProjectSidebarWorkflows.length,
   ]);
 
   const handleProjectButtonClick = useCallback(
@@ -2459,10 +2476,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const environmentApi = readEnvironmentApi(workflow.environmentId);
       if (!environmentApi) return;
       const fallbackWorkflow =
-        visibleProjectWorkflows.find(
+        visibleProjectSidebarWorkflows.find(
           (entry) => entry.environmentId === workflow.environmentId && entry.id !== workflow.id,
         ) ??
-        visibleProjectWorkflows.find((entry) => entry.id !== workflow.id) ??
+        visibleProjectSidebarWorkflows.find((entry) => entry.id !== workflow.id) ??
         null;
       const fallbackThread = visibleProjectThreads[0] ?? null;
       const deletingActiveWorkflow = activeRouteWorkflowKey === workflowSidebarKey(workflow);
@@ -2508,7 +2525,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       appSettingsConfirmThreadDelete,
       router,
       visibleProjectThreads,
-      visibleProjectWorkflows,
+      visibleProjectSidebarWorkflows,
     ],
   );
 
@@ -2626,7 +2643,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         orderedProjectThreadKeys={orderedProjectThreadKeys}
         renderedThreads={renderedThreads}
         renderedWorkflows={
-          pinnedCollapsedWorkflow ? [pinnedCollapsedWorkflow] : visibleProjectWorkflows
+          pinnedCollapsedWorkflow ? [pinnedCollapsedWorkflow] : visibleProjectSidebarWorkflows
         }
         showEmptyThreadState={showEmptyThreadState}
         shouldShowThreadPanel={shouldShowThreadPanel}
@@ -3375,14 +3392,21 @@ export default function Sidebar() {
     strict: false,
     select: (params) => resolveThreadRouteRef(params),
   });
-  const routeWorkflowRef = useParams({
+  const routeWorkflowEnvironmentId = useParams({
     strict: false,
-    select: (params) => resolveWorkflowRouteRef(params),
+    select: (params) =>
+      params.environmentId && params.workflowId ? (params.environmentId as EnvironmentId) : null,
+  });
+  const routeWorkflowId = useParams({
+    strict: false,
+    select: (params) =>
+      params.workflowId ? (params.workflowId as WorkflowDefinition["id"]) : null,
   });
   const routeThreadKey = routeThreadRef ? scopedThreadKey(routeThreadRef) : null;
-  const routeWorkflowKey = routeWorkflowRef
-    ? `${routeWorkflowRef.environmentId}:${routeWorkflowRef.workflowId}`
-    : null;
+  const routeWorkflowKey =
+    routeWorkflowEnvironmentId && routeWorkflowId
+      ? `${routeWorkflowEnvironmentId}:${routeWorkflowId}`
+      : null;
   const keybindings = useServerKeybindings();
   const openAddProjectCommandPalette = useCommandPaletteStore((store) => store.openAddProject);
   const [expandedThreadListsByProject, setExpandedThreadListsByProject] = useState<
@@ -3465,12 +3489,12 @@ export default function Sidebar() {
   const activeRouteWorkflow = useStore(
     useMemo(
       () => (state: import("../store").AppState) =>
-        routeWorkflowRef
-          ? selectEnvironmentState(state, routeWorkflowRef.environmentId).workflowById?.[
-              routeWorkflowRef.workflowId
+        routeWorkflowEnvironmentId && routeWorkflowId
+          ? selectEnvironmentState(state, routeWorkflowEnvironmentId).workflowById?.[
+              routeWorkflowId
             ]
           : undefined,
-      [routeWorkflowRef],
+      [routeWorkflowEnvironmentId, routeWorkflowId],
     ),
   );
   // Resolve the active route's project key to a logical key so it matches the
@@ -3484,8 +3508,8 @@ export default function Sidebar() {
               ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
               : null;
           })()
-        : routeWorkflowRef && activeRouteWorkflow
-          ? scopeProjectRef(routeWorkflowRef.environmentId, activeRouteWorkflow.projectId)
+        : routeWorkflowEnvironmentId && activeRouteWorkflow
+          ? scopeProjectRef(routeWorkflowEnvironmentId, activeRouteWorkflow.projectId)
           : null;
     if (!activeProjectRef) return null;
     const physicalKey =
@@ -3495,7 +3519,7 @@ export default function Sidebar() {
   }, [
     activeRouteWorkflow,
     routeThreadKey,
-    routeWorkflowRef,
+    routeWorkflowEnvironmentId,
     sidebarThreadByKey,
     physicalToLogicalKey,
     projectPhysicalKeyByScopedRef,

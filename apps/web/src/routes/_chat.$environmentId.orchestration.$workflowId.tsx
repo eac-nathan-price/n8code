@@ -1,55 +1,47 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo } from "react";
+import type { EnvironmentId, WorkflowId } from "@t3tools/contracts";
 
 import { DiffPanelLoadingState } from "../components/DiffPanelShell";
 import { SidebarInset } from "../components/ui/sidebar";
 import { selectEnvironmentState, useStore } from "../store";
-import { resolveWorkflowRouteRef } from "../workflowRoutes";
 
 const OrchestrationPanel = lazy(() => import("../components/OrchestrationPanel"));
 
 function WorkflowRouteView() {
   const navigate = useNavigate();
-  const workflowRef = Route.useParams({
-    select: (params) => resolveWorkflowRouteRef(params),
-  });
+  const params = Route.useParams();
+  const environmentId = params.environmentId as EnvironmentId;
+  const workflowId = params.workflowId as WorkflowId;
   const bootstrapComplete = useStore(
-    (store) => selectEnvironmentState(store, workflowRef?.environmentId ?? null).bootstrapComplete,
+    (store) => selectEnvironmentState(store, environmentId).bootstrapComplete,
   );
   const workflow = useStore(
     useMemo(
       () => (store: import("../store").AppState) =>
-        workflowRef
-          ? selectEnvironmentState(store, workflowRef.environmentId).workflowById?.[
-              workflowRef.workflowId
-            ]
-          : undefined,
-      [workflowRef],
+        selectEnvironmentState(store, environmentId).workflowById?.[workflowId],
+      [environmentId, workflowId],
     ),
   );
 
   useEffect(() => {
-    if (!workflowRef || !bootstrapComplete) {
+    if (!bootstrapComplete) {
       return;
     }
 
     if (!workflow) {
       void navigate({ to: "/", replace: true });
     }
-  }, [bootstrapComplete, navigate, workflow, workflowRef]);
+  }, [bootstrapComplete, navigate, workflow]);
 
-  if (!workflowRef || !bootstrapComplete || !workflow) {
+  if (!bootstrapComplete || !workflow) {
     return null;
   }
 
   return (
     <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
       <Suspense fallback={<DiffPanelLoadingState label="Loading orchestration..." />}>
-        <OrchestrationPanel
-          environmentId={workflowRef.environmentId}
-          workflowId={workflowRef.workflowId}
-          mode="primary"
-        />
+        <OrchestrationPanel environmentId={environmentId} workflowId={workflowId} mode="primary" />
       </Suspense>
     </SidebarInset>
   );
