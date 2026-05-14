@@ -64,9 +64,38 @@ function resolveModelSelection(input: {
 const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const workflowById = new Map<string, WorkflowDefinition>();
+  const runById = new Map<string, WorkflowRun>();
+  const runningNodeByThreadId = new Map<
+    string,
+    { readonly workflowRunId: WorkflowRun["id"]; readonly nodeRunId: WorkflowNodeRunId }
+  >();
 
   const dispatch = (command: OrchestrationCommand) =>
     orchestrationEngine.dispatch(command).pipe(Effect.ignoreCause({ log: true }));
+
+  const setRun = (run: WorkflowRun) => {
+    runById.set(run.id, run);
+    for (const nodeRun of run.nodeRuns) {
+      if (nodeRun.status === "running" && nodeRun.threadId !== null) {
+        runningNodeByThreadId.set(nodeRun.threadId, {
+          workflowRunId: run.id,
+          nodeRunId: nodeRun.id,
+        });
+      }
+    }
+  };
+
+  const updateRun = (
+    workflowRunId: WorkflowRun["id"],
+    update: (run: WorkflowRun) => WorkflowRun,
+  ) => {
+    const current = runById.get(workflowRunId);
+    if (!current) return null;
+    const next = update(current);
+    setRun(next);
+    return next;
+  };
 
   const failNode = (input: {
     readonly run: WorkflowRun;
@@ -116,6 +145,21 @@ const make = Effect.gen(function* () {
       threadId,
       startedAt,
     });
+    updateRun(input.run.id, (run) => ({
+      ...run,
+      nodeRuns: run.nodeRuns.map((entry) =>
+        entry.id === nodeRun
+          ? {
+              ...entry,
+              status: "running",
+              threadId,
+              startedAt,
+              updatedAt: startedAt,
+            }
+          : entry,
+      ),
+      updatedAt: startedAt,
+    }));
 
     yield* dispatch({
       type: "thread.turn.start",
@@ -159,12 +203,20 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
-    if (readModel === null) return;
-    const run = (readModel.workflowRuns ?? []).find((entry) => entry.id === workflowRunId);
+    const persistedRun = (readModel?.workflowRuns ?? []).find(
+      (entry) => entry.id === workflowRunId,
+    );
+    if (persistedRun) {
+      setRun(runById.get(persistedRun.id) ?? persistedRun);
+    }
+    for (const workflow of readModel?.workflows ?? []) {
+      workflowById.set(workflow.id, workflow);
+    }
+    const run = runById.get(workflowRunId);
     if (!run || run.status !== "running") return;
-    const workflow = (readModel.workflows ?? []).find((entry) => entry.id === run.workflowId);
+    const workflow = workflowById.get(run.workflowId);
     if (!workflow || workflow.deletedAt !== null) return;
-    const project = readModel.projects.find((entry) => entry.id === workflow.projectId);
+    const project = readModel?.projects.find((entry) => entry.id === workflow.projectId);
     const completedNodeIds = new Set(
       run.nodeRuns
         .filter((nodeRun) => nodeRun.status === "completed")
@@ -175,11 +227,19 @@ const make = Effect.gen(function* () {
         .filter((nodeRun) => nodeRun.status === "running")
         .map((nodeRun) => nodeRun.nodeId),
     );
-    const pendingNodes = workflow.nodes.filter((node) => {
+    let pendingNodes = workflow.nodes.filter((node) => {
       if (completedNodeIds.has(node.id) || runningNodeIds.has(node.id)) return false;
       const inbound = workflow.edges.filter((edge) => edge.targetNodeId === node.id);
       return inbound.every((edge) => completedNodeIds.has(edge.sourceNodeId));
     });
+    if (
+      pendingNodes.length === 0 &&
+      completedNodeIds.size === 0 &&
+      runningNodeIds.size === 0 &&
+      workflow.nodes.length > 0
+    ) {
+      pendingNodes = [workflow.nodes[0]!];
+    }
 
     if (pendingNodes.length === 0) {
       const hasRunning = run.nodeRuns.some((nodeRun) => nodeRun.status === "running");
@@ -214,31 +274,75 @@ const make = Effect.gen(function* () {
   const completeNodeForThread = Effect.fn("WorkflowRunnerReactor.completeNodeForThread")(function* (
     threadId: ThreadId,
   ) {
-    const readModel = yield* projectionSnapshotQuery.getCommandReadModel();
-    for (const run of readModel.workflowRuns ?? []) {
-      const nodeRun = run.nodeRuns.find(
-        (entry) => entry.threadId === threadId && entry.status === "running",
-      );
-      if (!nodeRun) continue;
-      const completedAt = yield* nowIso;
-      yield* dispatch({
-        type: "workflow.node-run.complete",
-        commandId: serverCommandId("workflow-node-complete"),
-        workflowRunId: run.id,
-        nodeRunId: nodeRun.id,
-        output: { threadId, completedAt },
-        completedAt,
-      });
-      yield* scheduleRunnableNodes(run.id);
-      return;
-    }
+    const runningNode = runningNodeByThreadId.get(threadId);
+    if (!runningNode) return;
+    const completedAt = yield* nowIso;
+    yield* dispatch({
+      type: "workflow.node-run.complete",
+      commandId: serverCommandId("workflow-node-complete"),
+      workflowRunId: runningNode.workflowRunId,
+      nodeRunId: runningNode.nodeRunId,
+      output: { threadId, completedAt },
+      completedAt,
+    });
+    runningNodeByThreadId.delete(threadId);
+    updateRun(runningNode.workflowRunId, (run) => ({
+      ...run,
+      nodeRuns: run.nodeRuns.map((nodeRun) =>
+        nodeRun.id === runningNode.nodeRunId
+          ? {
+              ...nodeRun,
+              status: "completed",
+              output: { threadId, completedAt },
+              completedAt,
+              updatedAt: completedAt,
+            }
+          : nodeRun,
+      ),
+      updatedAt: completedAt,
+    }));
+    yield* scheduleRunnableNodes(runningNode.workflowRunId);
   });
 
   const processEvent = (event: OrchestrationEvent) => {
     switch (event.type) {
+      case "workflow.created":
+      case "workflow.updated":
+        workflowById.set(event.payload.workflow.id, event.payload.workflow);
+        return Effect.void;
       case "workflow.run-started":
+        setRun(event.payload.run);
         return scheduleRunnableNodes(event.payload.run.id);
+      case "workflow.run-paused":
+      case "workflow.run-resumed":
+      case "workflow.run-stopping":
+        updateRun(event.payload.workflowRunId, (run) => ({
+          ...run,
+          status:
+            event.type === "workflow.run-paused"
+              ? "paused"
+              : event.type === "workflow.run-resumed"
+                ? "running"
+                : "stopping",
+          updatedAt: event.payload.updatedAt,
+        }));
+        return Effect.void;
       case "workflow.node-run-completed":
+        updateRun(event.payload.workflowRunId, (run) => ({
+          ...run,
+          nodeRuns: run.nodeRuns.map((nodeRun) =>
+            nodeRun.id === event.payload.nodeRunId
+              ? {
+                  ...nodeRun,
+                  status: "completed",
+                  ...(event.payload.output !== undefined ? { output: event.payload.output } : {}),
+                  completedAt: event.payload.completedAt,
+                  updatedAt: event.payload.completedAt,
+                }
+              : nodeRun,
+          ),
+          updatedAt: event.payload.completedAt,
+        }));
         return scheduleRunnableNodes(event.payload.workflowRunId);
       case "thread.turn-diff-completed":
         return completeNodeForThread(event.payload.threadId);

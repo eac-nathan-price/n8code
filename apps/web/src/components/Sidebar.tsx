@@ -9,6 +9,7 @@ import {
   SquarePenIcon,
   TerminalIcon,
   TriangleAlertIcon,
+  WorkflowIcon,
 } from "lucide-react";
 import {
   ChangeRequestStatusIcon,
@@ -39,11 +40,13 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   type ContextMenuItem,
   type DesktopUpdateState,
+  type EnvironmentId,
   ProjectId,
   type ScopedThreadRef,
   type SidebarProjectGroupingMode,
   type ThreadEnvMode,
   ThreadId,
+  type WorkflowDefinition,
 } from "@t3tools/contracts";
 import {
   parseScopedThreadKey,
@@ -67,10 +70,12 @@ import { isTerminalFocused } from "../lib/terminalFocus";
 import { isMacPlatform, newCommandId } from "../lib/utils";
 import {
   selectProjectByRef,
+  selectEnvironmentState,
   selectProjectsAcrossEnvironments,
   selectSidebarThreadsForProjectRefs,
   selectSidebarThreadsAcrossEnvironments,
   selectThreadByRef,
+  selectWorkflowsByEnvironment,
   useStore,
 } from "../store";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
@@ -97,6 +102,7 @@ import {
   resolveThreadRouteRef,
   resolveThreadRouteTarget,
 } from "../threadRoutes";
+import { buildWorkflowRouteParams, resolveWorkflowRouteRef } from "../workflowRoutes";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
@@ -177,6 +183,7 @@ import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { CommandDialogTrigger } from "./ui/command";
 import { readEnvironmentApi } from "../environmentApi";
+import { makeStarterWorkflow } from "../workflowTemplates";
 import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
 import { useServerKeybindings } from "../rpc/serverState";
 import {
@@ -216,6 +223,8 @@ const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> =
   repository_path: "Group by repository path",
   separate: "Keep separate",
 };
+
+type SidebarWorkflow = WorkflowDefinition & { readonly environmentId: EnvironmentId };
 
 function clampSidebarThreadPreviewCount(value: number): SidebarThreadPreviewCount {
   return Math.min(
@@ -718,6 +727,167 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
 });
 
+interface SidebarWorkflowRowProps {
+  workflow: SidebarWorkflow;
+  isActive: boolean;
+  renamingWorkflowKey: string | null;
+  renamingWorkflowTitle: string;
+  setRenamingWorkflowTitle: (title: string) => void;
+  renamingWorkflowInputRef: React.RefObject<HTMLInputElement | null>;
+  renamingWorkflowCommittedRef: React.RefObject<boolean>;
+  navigateToWorkflow: (workflow: SidebarWorkflow) => void;
+  handleWorkflowContextMenu: (
+    workflow: SidebarWorkflow,
+    position: { x: number; y: number },
+  ) => Promise<void>;
+  commitWorkflowRename: (
+    workflow: SidebarWorkflow,
+    newTitle: string,
+    originalTitle: string,
+  ) => Promise<void>;
+  cancelWorkflowRename: () => void;
+}
+
+function workflowSidebarKey(workflow: SidebarWorkflow): string {
+  return `${workflow.environmentId}:${workflow.id}`;
+}
+
+const SidebarWorkflowRow = memo(function SidebarWorkflowRow(props: SidebarWorkflowRowProps) {
+  const {
+    workflow,
+    isActive,
+    renamingWorkflowKey,
+    renamingWorkflowTitle,
+    setRenamingWorkflowTitle,
+    renamingWorkflowInputRef,
+    renamingWorkflowCommittedRef,
+    navigateToWorkflow,
+    handleWorkflowContextMenu,
+    commitWorkflowRename,
+    cancelWorkflowRename,
+  } = props;
+  const workflowKey = workflowSidebarKey(workflow);
+  const rowButtonRender = useMemo(() => <div role="button" tabIndex={0} />, []);
+  const handleRowClick = useCallback(() => {
+    navigateToWorkflow(workflow);
+  }, [navigateToWorkflow, workflow]);
+  const handleRowKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      navigateToWorkflow(workflow);
+    },
+    [navigateToWorkflow, workflow],
+  );
+  const handleRowContextMenu = useCallback(
+    (event: React.MouseEvent) => {
+      event.preventDefault();
+      void handleWorkflowContextMenu(workflow, {
+        x: event.clientX,
+        y: event.clientY,
+      });
+    },
+    [handleWorkflowContextMenu, workflow],
+  );
+  const handleRenameInputRef = useCallback(
+    (element: HTMLInputElement | null) => {
+      if (element && renamingWorkflowInputRef.current !== element) {
+        renamingWorkflowInputRef.current = element;
+        element.focus();
+        element.select();
+      }
+    },
+    [renamingWorkflowInputRef],
+  );
+  const handleRenameInputChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      setRenamingWorkflowTitle(event.target.value);
+    },
+    [setRenamingWorkflowTitle],
+  );
+  const handleRenameInputKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      event.stopPropagation();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        renamingWorkflowCommittedRef.current = true;
+        void commitWorkflowRename(workflow, renamingWorkflowTitle, workflow.title);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        renamingWorkflowCommittedRef.current = true;
+        cancelWorkflowRename();
+      }
+    },
+    [
+      cancelWorkflowRename,
+      commitWorkflowRename,
+      renamingWorkflowCommittedRef,
+      renamingWorkflowTitle,
+      workflow,
+    ],
+  );
+  const handleRenameInputBlur = useCallback(() => {
+    if (!renamingWorkflowCommittedRef.current) {
+      void commitWorkflowRename(workflow, renamingWorkflowTitle, workflow.title);
+    }
+  }, [commitWorkflowRename, renamingWorkflowCommittedRef, renamingWorkflowTitle, workflow]);
+  const handleRenameInputClick = useCallback((event: React.MouseEvent<HTMLInputElement>) => {
+    event.stopPropagation();
+  }, []);
+
+  return (
+    <SidebarMenuSubItem className="w-full">
+      <SidebarMenuSubButton
+        render={rowButtonRender}
+        size="sm"
+        isActive={isActive}
+        data-testid={`workflow-row-${workflow.id}`}
+        className={`${resolveThreadRowClassName({
+          isActive,
+          isSelected: false,
+        })} relative isolate`}
+        onClick={handleRowClick}
+        onKeyDown={handleRowKeyDown}
+        onContextMenu={handleRowContextMenu}
+      >
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+          <WorkflowIcon className="size-3 shrink-0 text-muted-foreground/70" />
+          {renamingWorkflowKey === workflowKey ? (
+            <input
+              ref={handleRenameInputRef}
+              className="min-w-0 flex-1 truncate rounded border border-ring bg-transparent px-0.5 text-base outline-none sm:text-xs"
+              value={renamingWorkflowTitle}
+              onChange={handleRenameInputChange}
+              onKeyDown={handleRenameInputKeyDown}
+              onBlur={handleRenameInputBlur}
+              onClick={handleRenameInputClick}
+            />
+          ) : (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span
+                    className="min-w-0 flex-1 truncate text-xs"
+                    data-testid={`workflow-title-${workflow.id}`}
+                  >
+                    {workflow.title}
+                  </span>
+                }
+              />
+              <TooltipPopup side="top" className="max-w-80 whitespace-normal leading-tight">
+                {workflow.title}
+              </TooltipPopup>
+            </Tooltip>
+          )}
+        </div>
+        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/40">
+          {formatRelativeTimeLabel(workflow.updatedAt ?? workflow.createdAt)}
+        </span>
+      </SidebarMenuSubButton>
+    </SidebarMenuSubItem>
+  );
+});
+
 interface SidebarProjectThreadListProps {
   projectKey: string;
   projectExpanded: boolean;
@@ -725,11 +895,13 @@ interface SidebarProjectThreadListProps {
   hiddenThreadStatus: ThreadStatusPill | null;
   orderedProjectThreadKeys: readonly string[];
   renderedThreads: readonly SidebarThreadSummary[];
+  renderedWorkflows: readonly SidebarWorkflow[];
   showEmptyThreadState: boolean;
   shouldShowThreadPanel: boolean;
   isThreadListExpanded: boolean;
   projectCwd: string;
   activeRouteThreadKey: string | null;
+  activeRouteWorkflowKey: string | null;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
   appSettingsConfirmThreadArchive: boolean;
   renamingThreadKey: string | null;
@@ -759,6 +931,22 @@ interface SidebarProjectThreadListProps {
     originalTitle: string,
   ) => Promise<void>;
   cancelRename: () => void;
+  renamingWorkflowKey: string | null;
+  renamingWorkflowTitle: string;
+  setRenamingWorkflowTitle: (title: string) => void;
+  renamingWorkflowInputRef: React.RefObject<HTMLInputElement | null>;
+  renamingWorkflowCommittedRef: React.RefObject<boolean>;
+  navigateToWorkflow: (workflow: SidebarWorkflow) => void;
+  handleWorkflowContextMenu: (
+    workflow: SidebarWorkflow,
+    position: { x: number; y: number },
+  ) => Promise<void>;
+  commitWorkflowRename: (
+    workflow: SidebarWorkflow,
+    newTitle: string,
+    originalTitle: string,
+  ) => Promise<void>;
+  cancelWorkflowRename: () => void;
   attemptArchiveThread: (threadRef: ScopedThreadRef) => Promise<void>;
   openPrLink: (event: React.MouseEvent<HTMLElement>, prUrl: string) => void;
   expandThreadListForProject: (projectKey: string) => void;
@@ -775,11 +963,13 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     hiddenThreadStatus,
     orderedProjectThreadKeys,
     renderedThreads,
+    renderedWorkflows,
     showEmptyThreadState,
     shouldShowThreadPanel,
     isThreadListExpanded,
     projectCwd,
     activeRouteThreadKey,
+    activeRouteWorkflowKey,
     threadJumpLabelByKey,
     appSettingsConfirmThreadArchive,
     renamingThreadKey,
@@ -798,6 +988,15 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     clearSelection,
     commitRename,
     cancelRename,
+    renamingWorkflowKey,
+    renamingWorkflowTitle,
+    setRenamingWorkflowTitle,
+    renamingWorkflowInputRef,
+    renamingWorkflowCommittedRef,
+    navigateToWorkflow,
+    handleWorkflowContextMenu,
+    commitWorkflowRename,
+    cancelWorkflowRename,
     attemptArchiveThread,
     openPrLink,
     expandThreadListForProject,
@@ -853,6 +1052,23 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
             />
           );
         })}
+      {shouldShowThreadPanel &&
+        renderedWorkflows.map((workflow) => (
+          <SidebarWorkflowRow
+            key={workflowSidebarKey(workflow)}
+            workflow={workflow}
+            isActive={activeRouteWorkflowKey === workflowSidebarKey(workflow)}
+            renamingWorkflowKey={renamingWorkflowKey}
+            renamingWorkflowTitle={renamingWorkflowTitle}
+            setRenamingWorkflowTitle={setRenamingWorkflowTitle}
+            renamingWorkflowInputRef={renamingWorkflowInputRef}
+            renamingWorkflowCommittedRef={renamingWorkflowCommittedRef}
+            navigateToWorkflow={navigateToWorkflow}
+            handleWorkflowContextMenu={handleWorkflowContextMenu}
+            commitWorkflowRename={commitWorkflowRename}
+            cancelWorkflowRename={cancelWorkflowRename}
+          />
+        ))}
 
       {projectExpanded && hasOverflowingThreads && !isThreadListExpanded && (
         <SidebarMenuSubItem className="w-full">
@@ -895,6 +1111,7 @@ interface SidebarProjectItemProps {
   project: SidebarProjectSnapshot;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
+  activeRouteWorkflowKey: string | null;
   newThreadShortcutLabel: string | null;
   handleNewThread: ReturnType<typeof useNewThreadHandler>["handleNewThread"];
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
@@ -915,6 +1132,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     project,
     isThreadListExpanded,
     activeRouteThreadKey,
+    activeRouteWorkflowKey,
     newThreadShortcutLabel,
     handleNewThread,
     archiveThread,
@@ -1027,6 +1245,22 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       ),
     ),
   );
+  const projectWorkflows = useStore(
+    useShallow(
+      useMemo(
+        () =>
+          (state: import("../store").AppState): SidebarWorkflow[] =>
+            project.memberProjectRefs.flatMap((projectRef) =>
+              selectWorkflowsByEnvironment(state, projectRef.environmentId)
+                .filter((workflow) => workflow.projectId === projectRef.projectId)
+                .map((workflow) =>
+                  Object.assign({}, workflow, { environmentId: projectRef.environmentId }),
+                ),
+            ),
+        [project.memberProjectRefs],
+      ),
+    ),
+  );
   const sidebarThreadByKey = useMemo(
     () =>
       new Map(
@@ -1058,6 +1292,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   );
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
+  const [renamingWorkflowKey, setRenamingWorkflowKey] = useState<string | null>(null);
+  const [renamingWorkflowTitle, setRenamingWorkflowTitle] = useState("");
   const [confirmingArchiveThreadKey, setConfirmingArchiveThreadKey] = useState<string | null>(null);
   const [projectRenameTarget, setProjectRenameTarget] = useState<SidebarProjectGroupMember | null>(
     null,
@@ -1070,6 +1306,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   >("inherit");
   const renamingCommittedRef = useRef(false);
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
+  const renamingWorkflowCommittedRef = useRef(false);
+  const renamingWorkflowInputRef = useRef<HTMLInputElement | null>(null);
   const confirmArchiveButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const memberProjectByScopedKey = useMemo(
     () =>
@@ -1130,6 +1368,18 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       visibleProjectThreads,
     };
   }, [projectThreads, threadLastVisitedAts, threadSortOrder]);
+  const visibleProjectWorkflows = useMemo(
+    () =>
+      [...projectWorkflows]
+        .filter((workflow) => workflow.deletedAt === null)
+        .toSorted(
+          (left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt) ||
+            right.createdAt.localeCompare(left.createdAt) ||
+            left.title.localeCompare(right.title),
+        ),
+    [projectWorkflows],
+  );
 
   const pinnedCollapsedThread = useMemo(() => {
     const activeThreadKey = activeRouteThreadKey ?? undefined;
@@ -1143,6 +1393,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       ) ?? null
     );
   }, [activeRouteThreadKey, projectExpanded, visibleProjectThreads]);
+  const pinnedCollapsedWorkflow = useMemo(() => {
+    const activeWorkflowKey = activeRouteWorkflowKey ?? undefined;
+    if (!activeWorkflowKey || projectExpanded) {
+      return null;
+    }
+    return (
+      visibleProjectWorkflows.find(
+        (workflow) => workflowSidebarKey(workflow) === activeWorkflowKey,
+      ) ?? null
+    );
+  }, [activeRouteWorkflowKey, projectExpanded, visibleProjectWorkflows]);
 
   const {
     hasOverflowingThreads,
@@ -1193,17 +1454,23 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         hiddenThreads.map((thread) => resolveProjectThreadStatus(thread)),
       ),
       renderedThreads,
-      showEmptyThreadState: projectExpanded && visibleProjectThreads.length === 0,
-      shouldShowThreadPanel: projectExpanded || pinnedCollapsedThread !== null,
+      showEmptyThreadState:
+        projectExpanded &&
+        visibleProjectThreads.length === 0 &&
+        visibleProjectWorkflows.length === 0,
+      shouldShowThreadPanel:
+        projectExpanded || pinnedCollapsedThread !== null || pinnedCollapsedWorkflow !== null,
     };
   }, [
     isThreadListExpanded,
+    pinnedCollapsedWorkflow,
     pinnedCollapsedThread,
     projectExpanded,
     projectThreads,
     sidebarThreadPreviewCount,
     threadLastVisitedAts,
     visibleProjectThreads,
+    visibleProjectWorkflows.length,
   ]);
 
   const handleProjectButtonClick = useCallback(
@@ -1593,6 +1860,110 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ],
   );
 
+  const navigateToWorkflow = useCallback(
+    (workflow: SidebarWorkflow) => {
+      if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) {
+        clearSelection();
+      }
+      if (isMobile) {
+        setOpenMobile(false);
+      }
+      void router.navigate({
+        to: "/$environmentId/orchestration/$workflowId",
+        params: buildWorkflowRouteParams({
+          environmentId: workflow.environmentId,
+          workflowId: workflow.id,
+        }),
+      });
+    },
+    [clearSelection, isMobile, router, setOpenMobile],
+  );
+
+  const createWorkflowForProjectMember = useCallback(
+    async (member: SidebarProjectGroupMember) => {
+      const api = readEnvironmentApi(member.environmentId);
+      if (!api) {
+        toastManager.add({
+          type: "error",
+          title: "Project API unavailable",
+        });
+        return;
+      }
+      const workflow = makeStarterWorkflow({
+        projectId: member.id,
+        title: "Goal loop",
+        defaultModelSelection: member.defaultModelSelection,
+      });
+      try {
+        await api.orchestration.dispatchCommand({
+          type: "workflow.create",
+          commandId: newCommandId(),
+          workflow,
+          createdAt: workflow.createdAt,
+        });
+        if (isMobile) {
+          setOpenMobile(false);
+        }
+        void router.navigate({
+          to: "/$environmentId/orchestration/$workflowId",
+          params: buildWorkflowRouteParams({
+            environmentId: member.environmentId,
+            workflowId: workflow.id,
+          }),
+        });
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to create orchestration",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+    },
+    [isMobile, router, setOpenMobile],
+  );
+
+  const handleCreateWorkflowClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (project.memberProjects.length === 1) {
+        void createWorkflowForProjectMember(project.memberProjects[0]!);
+        return;
+      }
+
+      void (async () => {
+        const api = readLocalApi();
+        if (!api) {
+          return;
+        }
+        const clicked = await api.contextMenu.show(
+          project.memberProjects.map((member) => ({
+            id: member.physicalProjectKey,
+            label: formatProjectMemberActionLabel(member, project.groupedProjectCount),
+          })),
+          {
+            x: event.clientX,
+            y: event.clientY,
+          },
+        );
+        if (!clicked) {
+          return;
+        }
+        const targetMember = project.memberProjects.find(
+          (member) => member.physicalProjectKey === clicked,
+        );
+        if (!targetMember) {
+          return;
+        }
+        await createWorkflowForProjectMember(targetMember);
+      })();
+    },
+    [createWorkflowForProjectMember, project.groupedProjectCount, project.memberProjects],
+  );
+
   const handleMultiSelectContextMenu = useCallback(
     async (position: { x: number; y: number }) => {
       const api = readLocalApi();
@@ -1763,6 +2134,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     setRenamingThreadKey(null);
     renamingInputRef.current = null;
   }, []);
+  const cancelWorkflowRename = useCallback(() => {
+    setRenamingWorkflowKey(null);
+    renamingWorkflowInputRef.current = null;
+  }, []);
 
   const commitRename = useCallback(
     async (threadRef: ScopedThreadRef, newTitle: string, originalTitle: string) => {
@@ -1805,6 +2180,58 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           stackedThreadToast({
             type: "error",
             title: "Failed to rename thread",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+      finishRename();
+    },
+    [],
+  );
+
+  const commitWorkflowRename = useCallback(
+    async (workflow: SidebarWorkflow, newTitle: string, originalTitle: string) => {
+      const workflowKey = workflowSidebarKey(workflow);
+      const finishRename = () => {
+        setRenamingWorkflowKey((current) => {
+          if (current !== workflowKey) return current;
+          renamingWorkflowInputRef.current = null;
+          return null;
+        });
+      };
+
+      const trimmed = newTitle.trim();
+      if (trimmed.length === 0) {
+        toastManager.add({
+          type: "warning",
+          title: "Orchestration title cannot be empty",
+        });
+        finishRename();
+        return;
+      }
+      if (trimmed === originalTitle) {
+        finishRename();
+        return;
+      }
+      const api = readEnvironmentApi(workflow.environmentId);
+      if (!api) {
+        finishRename();
+        return;
+      }
+      try {
+        await api.orchestration.dispatchCommand({
+          type: "workflow.update",
+          commandId: newCommandId(),
+          workflowId: workflow.id,
+          title: trimmed,
+          expectedVersion: workflow.version,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to rename orchestration",
             description: error instanceof Error ? error.message : "An error occurred.",
           }),
         );
@@ -1976,6 +2403,115 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ],
   );
 
+  const handleWorkflowContextMenu = useCallback(
+    async (workflow: SidebarWorkflow, position: { x: number; y: number }) => {
+      const api = readLocalApi();
+      if (!api) return;
+      const clicked = await api.contextMenu.show(
+        [
+          { id: "rename", label: "Rename orchestration" },
+          { id: "copy-workflow-id", label: "Copy Orchestration ID" },
+          { id: "delete", label: "Delete", destructive: true },
+        ],
+        position,
+      );
+
+      if (clicked === "rename") {
+        setRenamingWorkflowKey(workflowSidebarKey(workflow));
+        setRenamingWorkflowTitle(workflow.title);
+        renamingWorkflowCommittedRef.current = false;
+        return;
+      }
+
+      if (clicked === "copy-workflow-id") {
+        try {
+          await navigator.clipboard.writeText(workflow.id);
+          toastManager.add({
+            type: "success",
+            title: "Orchestration ID copied",
+            description: workflow.id,
+          });
+        } catch (error) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to copy orchestration ID",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+        return;
+      }
+
+      if (clicked !== "delete") return;
+      if (appSettingsConfirmThreadDelete) {
+        const confirmed = await api.dialogs.confirm(
+          [
+            `Delete orchestration "${workflow.title}"?`,
+            "This permanently removes this orchestration from the project.",
+          ].join("\n"),
+        );
+        if (!confirmed) {
+          return;
+        }
+      }
+
+      const environmentApi = readEnvironmentApi(workflow.environmentId);
+      if (!environmentApi) return;
+      const fallbackWorkflow =
+        visibleProjectWorkflows.find(
+          (entry) => entry.environmentId === workflow.environmentId && entry.id !== workflow.id,
+        ) ??
+        visibleProjectWorkflows.find((entry) => entry.id !== workflow.id) ??
+        null;
+      const fallbackThread = visibleProjectThreads[0] ?? null;
+      const deletingActiveWorkflow = activeRouteWorkflowKey === workflowSidebarKey(workflow);
+
+      await environmentApi.orchestration.dispatchCommand({
+        type: "workflow.delete",
+        commandId: newCommandId(),
+        workflowId: workflow.id,
+        deletedAt: new Date().toISOString(),
+      });
+
+      if (!deletingActiveWorkflow) {
+        return;
+      }
+
+      if (fallbackWorkflow) {
+        await router.navigate({
+          to: "/$environmentId/orchestration/$workflowId",
+          params: buildWorkflowRouteParams({
+            environmentId: fallbackWorkflow.environmentId,
+            workflowId: fallbackWorkflow.id,
+          }),
+          replace: true,
+        });
+        return;
+      }
+
+      if (fallbackThread) {
+        await router.navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(
+            scopeThreadRef(fallbackThread.environmentId, fallbackThread.id),
+          ),
+          replace: true,
+        });
+        return;
+      }
+
+      await router.navigate({ to: "/", replace: true });
+    },
+    [
+      activeRouteWorkflowKey,
+      appSettingsConfirmThreadDelete,
+      router,
+      visibleProjectThreads,
+      visibleProjectWorkflows,
+    ],
+  );
+
   return (
     <>
       <div className="group/project-header relative">
@@ -2053,7 +2589,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         <Tooltip>
           <TooltipTrigger
             render={
-              <div className="pointer-events-none absolute top-1 right-1.5 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
+              <div className="pointer-events-none absolute top-1 right-1.5 flex items-center gap-0.5 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
                 <button
                   type="button"
                   aria-label={`Create new thread in ${project.displayName}`}
@@ -2063,11 +2599,21 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 >
                   <SquarePenIcon className="size-3.5" />
                 </button>
+                <button
+                  type="button"
+                  aria-label={`Create new orchestration in ${project.displayName}`}
+                  data-testid="new-workflow-button"
+                  className="inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground/60 hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                  onClick={handleCreateWorkflowClick}
+                >
+                  <WorkflowIcon className="size-3.5" />
+                </button>
               </div>
             }
           />
           <TooltipPopup side="top">
-            {newThreadShortcutLabel ? `New thread (${newThreadShortcutLabel})` : "New thread"}
+            {newThreadShortcutLabel ? `New thread (${newThreadShortcutLabel})` : "New thread"} / New
+            orchestration
           </TooltipPopup>
         </Tooltip>
       </div>
@@ -2079,11 +2625,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         hiddenThreadStatus={hiddenThreadStatus}
         orderedProjectThreadKeys={orderedProjectThreadKeys}
         renderedThreads={renderedThreads}
+        renderedWorkflows={
+          pinnedCollapsedWorkflow ? [pinnedCollapsedWorkflow] : visibleProjectWorkflows
+        }
         showEmptyThreadState={showEmptyThreadState}
         shouldShowThreadPanel={shouldShowThreadPanel}
         isThreadListExpanded={isThreadListExpanded}
         projectCwd={project.cwd}
         activeRouteThreadKey={activeRouteThreadKey}
+        activeRouteWorkflowKey={activeRouteWorkflowKey}
         threadJumpLabelByKey={threadJumpLabelByKey}
         appSettingsConfirmThreadArchive={appSettingsConfirmThreadArchive}
         renamingThreadKey={renamingThreadKey}
@@ -2102,6 +2652,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         clearSelection={clearSelection}
         commitRename={commitRename}
         cancelRename={cancelRename}
+        renamingWorkflowKey={renamingWorkflowKey}
+        renamingWorkflowTitle={renamingWorkflowTitle}
+        setRenamingWorkflowTitle={setRenamingWorkflowTitle}
+        renamingWorkflowInputRef={renamingWorkflowInputRef}
+        renamingWorkflowCommittedRef={renamingWorkflowCommittedRef}
+        navigateToWorkflow={navigateToWorkflow}
+        handleWorkflowContextMenu={handleWorkflowContextMenu}
+        commitWorkflowRename={commitWorkflowRename}
+        cancelWorkflowRename={cancelWorkflowRename}
         attemptArchiveThread={attemptArchiveThread}
         openPrLink={openPrLink}
         expandThreadListForProject={expandThreadListForProject}
@@ -2541,6 +3100,7 @@ interface SidebarProjectsContentProps {
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
   routeThreadKey: string | null;
+  routeWorkflowKey: string | null;
   newThreadShortcutLabel: string | null;
   commandPaletteShortcutLabel: string | null;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
@@ -2582,6 +3142,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     expandedThreadListsByProject,
     activeRouteProjectKey,
     routeThreadKey,
+    routeWorkflowKey,
     newThreadShortcutLabel,
     commandPaletteShortcutLabel,
     threadJumpLabelByKey,
@@ -2726,6 +3287,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         activeRouteThreadKey={
                           activeRouteProjectKey === project.projectKey ? routeThreadKey : null
                         }
+                        activeRouteWorkflowKey={
+                          activeRouteProjectKey === project.projectKey ? routeWorkflowKey : null
+                        }
                         newThreadShortcutLabel={newThreadShortcutLabel}
                         handleNewThread={handleNewThread}
                         archiveThread={archiveThread}
@@ -2757,6 +3321,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
                   activeRouteProjectKey === project.projectKey ? routeThreadKey : null
+                }
+                activeRouteWorkflowKey={
+                  activeRouteProjectKey === project.projectKey ? routeWorkflowKey : null
                 }
                 newThreadShortcutLabel={newThreadShortcutLabel}
                 handleNewThread={handleNewThread}
@@ -2808,7 +3375,14 @@ export default function Sidebar() {
     strict: false,
     select: (params) => resolveThreadRouteRef(params),
   });
+  const routeWorkflowRef = useParams({
+    strict: false,
+    select: (params) => resolveWorkflowRouteRef(params),
+  });
   const routeThreadKey = routeThreadRef ? scopedThreadKey(routeThreadRef) : null;
+  const routeWorkflowKey = routeWorkflowRef
+    ? `${routeWorkflowRef.environmentId}:${routeWorkflowRef.workflowId}`
+    : null;
   const keybindings = useServerKeybindings();
   const openAddProjectCommandPalette = useCommandPaletteStore((store) => store.openAddProject);
   const [expandedThreadListsByProject, setExpandedThreadListsByProject] = useState<
@@ -2888,20 +3462,44 @@ export default function Sidebar() {
       ),
     [sidebarThreads],
   );
+  const activeRouteWorkflow = useStore(
+    useMemo(
+      () => (state: import("../store").AppState) =>
+        routeWorkflowRef
+          ? selectEnvironmentState(state, routeWorkflowRef.environmentId).workflowById?.[
+              routeWorkflowRef.workflowId
+            ]
+          : undefined,
+      [routeWorkflowRef],
+    ),
+  );
   // Resolve the active route's project key to a logical key so it matches the
   // sidebar's grouped project entries.
   const activeRouteProjectKey = useMemo(() => {
-    if (!routeThreadKey) {
-      return null;
-    }
-    const activeThread = sidebarThreadByKey.get(routeThreadKey);
-    if (!activeThread) return null;
+    const activeProjectRef =
+      routeThreadKey !== null
+        ? (() => {
+            const activeThread = sidebarThreadByKey.get(routeThreadKey);
+            return activeThread
+              ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
+              : null;
+          })()
+        : routeWorkflowRef && activeRouteWorkflow
+          ? scopeProjectRef(routeWorkflowRef.environmentId, activeRouteWorkflow.projectId)
+          : null;
+    if (!activeProjectRef) return null;
     const physicalKey =
-      projectPhysicalKeyByScopedRef.get(
-        scopedProjectKey(scopeProjectRef(activeThread.environmentId, activeThread.projectId)),
-      ) ?? scopedProjectKey(scopeProjectRef(activeThread.environmentId, activeThread.projectId));
+      projectPhysicalKeyByScopedRef.get(scopedProjectKey(activeProjectRef)) ??
+      scopedProjectKey(activeProjectRef);
     return physicalToLogicalKey.get(physicalKey) ?? physicalKey;
-  }, [routeThreadKey, sidebarThreadByKey, physicalToLogicalKey, projectPhysicalKeyByScopedRef]);
+  }, [
+    activeRouteWorkflow,
+    routeThreadKey,
+    routeWorkflowRef,
+    sidebarThreadByKey,
+    physicalToLogicalKey,
+    projectPhysicalKeyByScopedRef,
+  ]);
 
   // Group threads by logical project key so all threads from grouped projects
   // are displayed together.
@@ -3445,6 +4043,7 @@ export default function Sidebar() {
             expandedThreadListsByProject={expandedThreadListsByProject}
             activeRouteProjectKey={activeRouteProjectKey}
             routeThreadKey={routeThreadKey}
+            routeWorkflowKey={routeWorkflowKey}
             newThreadShortcutLabel={newThreadShortcutLabel}
             commandPaletteShortcutLabel={commandPaletteShortcutLabel}
             threadJumpLabelByKey={visibleThreadJumpLabelByKey}

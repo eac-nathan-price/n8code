@@ -6,20 +6,15 @@ import {
   CommandId,
   type EnvironmentId,
   type ModelSelection,
-  type ProjectId,
   type ProviderInstanceId,
-  ThreadId,
-  type WorkflowDefinition,
-  WorkflowEdgeId,
-  WorkflowId,
   type WorkflowNodeDefinition,
-  WorkflowNodeId,
+  type WorkflowId,
   WorkflowRunId,
   type WorkflowRun,
 } from "@t3tools/contracts";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { readEnvironmentConnection } from "~/environments/runtime";
+import { readEnvironmentApi } from "~/environmentApi";
 import { useSettings } from "~/hooks/useSettings";
 import { getAppModelOptionsForInstance } from "~/modelSelection";
 import { deriveProviderInstanceEntries, sortProviderInstanceEntries } from "~/providerInstances";
@@ -29,116 +24,6 @@ import { cn } from "~/lib/utils";
 
 function id(prefix: string): string {
   return `${prefix}:${crypto.randomUUID()}`;
-}
-
-function makeStarterWorkflow(input: {
-  readonly projectId: ProjectId;
-  readonly title: string;
-  readonly defaultModelSelection: WorkflowDefinition["defaultModelSelection"];
-}): WorkflowDefinition {
-  const now = new Date().toISOString();
-  const planNodeId = WorkflowNodeId.make(id("workflow-node:plan"));
-  const buildNodeId = WorkflowNodeId.make(id("workflow-node:build"));
-  const reviewNodeId = WorkflowNodeId.make(id("workflow-node:review"));
-  const summarizeNodeId = WorkflowNodeId.make(id("workflow-node:summarize"));
-  const nodes: WorkflowNodeDefinition[] = [
-    {
-      id: planNodeId,
-      kind: "agent",
-      title: "Plan",
-      position: { x: 0, y: 80 },
-      config: {
-        promptTemplate: "Create a concise plan to complete this goal:\n\n{{goal}}",
-        modelSelection: null,
-        runtimeMode: "full-access",
-        interactionMode: "plan",
-        inputBindings: {},
-        retryPolicy: { maxAttempts: 0 },
-      },
-    },
-    {
-      id: buildNodeId,
-      kind: "agent",
-      title: "Build",
-      position: { x: 280, y: 80 },
-      config: {
-        promptTemplate:
-          "Implement the plan for this goal:\n\nGoal:\n{{goal}}\n\nPlan:\n{{Plan.output}}",
-        modelSelection: null,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        inputBindings: {},
-        retryPolicy: { maxAttempts: 0 },
-      },
-    },
-    {
-      id: reviewNodeId,
-      kind: "condition",
-      title: "Check Completion",
-      position: { x: 560, y: 80 },
-      config: {
-        promptTemplate:
-          "Check whether the goal is fully complete. Return JSON with complete:boolean and summary:string.\n\n{{Build.output}}",
-        modelSelection: null,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        inputBindings: {},
-        outputSchema: { type: "object", properties: { complete: { type: "boolean" } } },
-        retryPolicy: { maxAttempts: 0 },
-      },
-    },
-    {
-      id: summarizeNodeId,
-      kind: "agent",
-      title: "Summarize",
-      position: { x: 840, y: 80 },
-      config: {
-        promptTemplate: "Summarize the completed work for the user.\n\n{{Check Completion.output}}",
-        modelSelection: null,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        inputBindings: {},
-        retryPolicy: { maxAttempts: 0 },
-      },
-    },
-  ];
-
-  return {
-    id: WorkflowId.make(id("workflow")),
-    projectId: input.projectId,
-    title: input.title,
-    description: "Goal loop starter workflow",
-    defaultModelSelection: input.defaultModelSelection,
-    nodes,
-    edges: [
-      {
-        id: WorkflowEdgeId.make(id("workflow-edge")),
-        sourceNodeId: planNodeId,
-        targetNodeId: buildNodeId,
-      },
-      {
-        id: WorkflowEdgeId.make(id("workflow-edge")),
-        sourceNodeId: buildNodeId,
-        targetNodeId: reviewNodeId,
-      },
-      {
-        id: WorkflowEdgeId.make(id("workflow-edge")),
-        sourceNodeId: reviewNodeId,
-        targetNodeId: summarizeNodeId,
-        condition: "complete === true",
-      },
-      {
-        id: WorkflowEdgeId.make(id("workflow-edge")),
-        sourceNodeId: reviewNodeId,
-        targetNodeId: planNodeId,
-        condition: "complete === false",
-      },
-    ],
-    version: 0,
-    createdAt: now,
-    updatedAt: now,
-    deletedAt: null,
-  };
 }
 
 function latestRunForWorkflow(runs: WorkflowRun[]): WorkflowRun | null {
@@ -205,29 +90,12 @@ function ModelSelectionSelect(props: {
 
 export function OrchestrationPanel(props: {
   readonly environmentId: EnvironmentId;
-  readonly threadId: ThreadId;
-  readonly mode: "sidebar" | "sheet";
+  readonly workflowId: WorkflowId;
+  readonly mode: "primary";
 }) {
   const environmentState = useStore((state) => selectEnvironmentState(state, props.environmentId));
-  const threadShell = environmentState.threadShellById[props.threadId];
-  const project = threadShell ? environmentState.projectById[threadShell.projectId] : undefined;
-  const latestMessageText = useMemo(() => {
-    const messageIds = environmentState.messageIdsByThreadId[props.threadId] ?? [];
-    const latestMessageId = messageIds.at(-1);
-    return latestMessageId
-      ? environmentState.messageByThreadId[props.threadId]?.[latestMessageId]?.text
-      : undefined;
-  }, [environmentState, props.threadId]);
-  const workflows = useMemo(
-    () =>
-      (environmentState.workflowIds ?? [])
-        .map((workflowId) => environmentState.workflowById?.[workflowId])
-        .filter((workflow): workflow is WorkflowDefinition => workflow !== undefined),
-    [environmentState],
-  );
-  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
-  const workflow =
-    workflows.find((entry) => entry.id === selectedWorkflowId) ?? workflows[0] ?? null;
+  const workflow = environmentState.workflowById?.[props.workflowId] ?? null;
+  const project = workflow ? environmentState.projectById[workflow.projectId] : undefined;
   const runs = useMemo(
     () =>
       workflow
@@ -244,6 +112,10 @@ export function OrchestrationPanel(props: {
   const selectedNode = workflow?.nodes.find((node) => node.id === selectedNodeId) ?? null;
   const [promptDraft, setPromptDraft] = useState("");
   const [goal, setGoal] = useState("");
+
+  useEffect(() => {
+    setSelectedNodeId(null);
+  }, [props.workflowId]);
 
   useEffect(() => {
     setPromptDraft(selectedNode?.config.promptTemplate ?? "");
@@ -293,56 +165,46 @@ export function OrchestrationPanel(props: {
     return { nodes, edges };
   }, [latestRun, project?.defaultModelSelection, workflow]);
 
-  const dispatch = async (command: ClientOrchestrationCommand) => {
-    const connection = readEnvironmentConnection(props.environmentId);
-    if (!connection) return;
-    await connection.client.orchestration.dispatchCommand(command);
-  };
+  const dispatch = useCallback(
+    async (command: ClientOrchestrationCommand) => {
+      const api = readEnvironmentApi(props.environmentId);
+      if (!api) return;
+      await api.orchestration.dispatchCommand(command);
+    },
+    [props.environmentId],
+  );
 
-  const createWorkflow = async () => {
-    if (!project) return;
-    const now = new Date().toISOString();
-    const workflow = makeStarterWorkflow({
-      projectId: project.id,
-      title: "Goal loop",
-      defaultModelSelection: project.defaultModelSelection,
-    });
-    await dispatch({
-      type: "workflow.create",
-      commandId: CommandId.make(id("client:workflow-create")),
-      workflow,
-      createdAt: now,
-    });
-    setSelectedWorkflowId(workflow.id);
-  };
+  const updateWorkflow = useCallback(
+    async (
+      patch: Pick<
+        Extract<ClientOrchestrationCommand, { type: "workflow.update" }>,
+        "defaultModelSelection" | "nodes"
+      >,
+    ) => {
+      if (!workflow) return;
+      await dispatch({
+        type: "workflow.update",
+        commandId: CommandId.make(id("client:workflow-update")),
+        workflowId: workflow.id,
+        expectedVersion: workflow.version,
+        updatedAt: new Date().toISOString(),
+        ...patch,
+      });
+    },
+    [dispatch, workflow],
+  );
 
-  const updateWorkflow = async (
-    patch: Pick<
-      Extract<ClientOrchestrationCommand, { type: "workflow.update" }>,
-      "defaultModelSelection" | "nodes"
-    >,
-  ) => {
-    if (!workflow) return;
-    await dispatch({
-      type: "workflow.update",
-      commandId: CommandId.make(id("client:workflow-update")),
-      workflowId: workflow.id,
-      expectedVersion: workflow.version,
-      updatedAt: new Date().toISOString(),
-      ...patch,
-    });
-  };
+  const updateSelectedNode = useCallback(
+    async (update: (node: WorkflowNodeDefinition) => WorkflowNodeDefinition) => {
+      if (!workflow || !selectedNode) return;
+      await updateWorkflow({
+        nodes: workflow.nodes.map((node) => (node.id === selectedNode.id ? update(node) : node)),
+      });
+    },
+    [selectedNode, updateWorkflow, workflow],
+  );
 
-  const updateSelectedNode = async (
-    update: (node: WorkflowNodeDefinition) => WorkflowNodeDefinition,
-  ) => {
-    if (!workflow || !selectedNode) return;
-    await updateWorkflow({
-      nodes: workflow.nodes.map((node) => (node.id === selectedNode.id ? update(node) : node)),
-    });
-  };
-
-  const runWorkflow = async () => {
+  const runWorkflow = useCallback(async () => {
     if (!workflow) return;
     const now = new Date().toISOString();
     await dispatch({
@@ -350,13 +212,13 @@ export function OrchestrationPanel(props: {
       commandId: CommandId.make(id("client:workflow-run-start")),
       workflowRunId: WorkflowRunId.make(id("workflow-run")),
       workflowId: workflow.id,
-      goal: goal.trim() || latestMessageText || workflow.title,
+      goal: goal.trim() || workflow.title,
       inputs: {},
       createdAt: now,
     });
-  };
+  }, [dispatch, goal, workflow]);
 
-  const stopRun = async () => {
+  const stopRun = useCallback(async () => {
     if (!latestRun) return;
     await dispatch({
       type: "workflow.run.stop",
@@ -364,7 +226,26 @@ export function OrchestrationPanel(props: {
       workflowRunId: latestRun.id,
       updatedAt: new Date().toISOString(),
     });
-  };
+  }, [dispatch, latestRun]);
+
+  useEffect(() => {
+    if (!workflow || !selectedNode) return;
+    if (promptDraft === selectedNode.config.promptTemplate) return;
+
+    const timeout = window.setTimeout(() => {
+      void updateSelectedNode((node) => ({
+        ...node,
+        config: {
+          ...node.config,
+          promptTemplate: promptDraft,
+        },
+      }));
+    }, 600);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [promptDraft, selectedNode, updateSelectedNode, workflow]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
@@ -374,27 +255,12 @@ export function OrchestrationPanel(props: {
             <h2 className="font-semibold">Orchestration</h2>
             <p className="text-xs text-muted-foreground">Visual workflow editor and run monitor</p>
           </div>
-          <button
-            type="button"
-            className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent"
-            onClick={createWorkflow}
-          >
-            New
-          </button>
+          <div className="text-xs text-muted-foreground">{project?.name ?? "Unknown project"}</div>
         </div>
         <div className="mt-3 flex gap-2">
-          <select
-            className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-sm"
-            value={workflow?.id ?? ""}
-            onChange={(event) => setSelectedWorkflowId(event.target.value || null)}
-          >
-            {workflows.length === 0 ? <option value="">No workflows</option> : null}
-            {workflows.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.title}
-              </option>
-            ))}
-          </select>
+          <div className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-sm">
+            {workflow?.title ?? "Missing workflow"}
+          </div>
           <button
             type="button"
             className="rounded-md bg-primary px-3 py-1 text-sm text-primary-foreground disabled:opacity-50"
@@ -437,9 +303,18 @@ export function OrchestrationPanel(props: {
             fitView
             onNodeClick={(_, node) => setSelectedNodeId(node.id)}
           >
-            <Background />
-            <Controls />
-            {props.mode === "sidebar" ? <MiniMap pannable zoomable /> : null}
+            <Background color="hsl(var(--border))" />
+            <Controls className="overflow-hidden rounded-md border border-border bg-card text-foreground [&_button]:!border-border [&_button]:!bg-card [&_button]:!text-foreground [&_button:hover]:!bg-accent [&_svg]:!fill-current" />
+            {props.mode === "primary" ? (
+              <MiniMap
+                pannable
+                zoomable
+                className="overflow-hidden rounded-md border border-border bg-card"
+                maskColor="hsl(var(--background) / 0.72)"
+                nodeColor="hsl(var(--primary))"
+                nodeStrokeColor="hsl(var(--border))"
+              />
+            ) : null}
           </ReactFlow>
         ) : (
           <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
@@ -490,7 +365,7 @@ export function OrchestrationPanel(props: {
                 }))
               }
             >
-              Save Prompt
+              Save now
             </button>
           </div>
         ) : (
