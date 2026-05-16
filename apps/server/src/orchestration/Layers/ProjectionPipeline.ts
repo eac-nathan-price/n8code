@@ -3,14 +3,18 @@ import {
   type ChatAttachment,
   type OrchestrationEvent,
   ThreadId,
+  WorkflowRun,
+  WorkflowRunId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
@@ -83,6 +87,12 @@ interface AttachmentSideEffects {
   readonly deletedThreadIds: Set<string>;
   readonly prunedThreadRelativePaths: Map<string, Set<string>>;
 }
+
+type WorkflowRunModel = typeof WorkflowRun.Type;
+
+const WorkflowRunProjectionRow = Schema.Struct({
+  run: Schema.fromJsonString(WorkflowRun),
+});
 
 const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsForProjection")(
   (input: { readonly attachments: ReadonlyArray<ChatAttachment> }) =>
@@ -1419,66 +1429,161 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const applyWorkflowRunsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyWorkflowRunsProjection",
     )(function* (event, _attachmentSideEffects) {
-      let run:
-        | {
-            readonly id: string;
-            readonly workflowId: string;
-            readonly projectId: string;
-            readonly status: string;
-            readonly createdAt: string;
-            readonly updatedAt: string;
-            readonly completedAt: string | null;
-          }
-        | undefined;
-      let runJson: string | undefined;
-      if (event.type === "workflow.run-started") {
-        run = event.payload.run;
-        // @effect-diagnostics-next-line preferSchemaOverJson:off
-        runJson = JSON.stringify(event.payload.run);
-      } else if (
-        event.type === "workflow.run-paused" ||
-        event.type === "workflow.run-resumed" ||
-        event.type === "workflow.run-stopping" ||
-        event.type === "workflow.run-completed" ||
-        event.type === "workflow.node-run-started" ||
-        event.type === "workflow.node-run-completed" ||
-        event.type === "workflow.node-run-failed"
-      ) {
-        return;
-      } else {
-        return;
-      }
+      const readWorkflowRunProjectionRow = SqlSchema.findOneOption({
+        Request: Schema.Struct({ workflowRunId: WorkflowRunId }),
+        Result: WorkflowRunProjectionRow,
+        execute: ({ workflowRunId }) =>
+          sql`
+            SELECT run_json AS "run"
+            FROM projection_workflow_runs
+            WHERE workflow_run_id = ${workflowRunId}
+          `,
+      });
 
-      yield* sql`
-        INSERT INTO projection_workflow_runs (
-          workflow_run_id,
-          workflow_id,
-          project_id,
-          status,
-          run_json,
-          created_at,
-          updated_at,
-          completed_at
-        )
-        VALUES (
-          ${run.id},
-          ${run.workflowId},
-          ${run.projectId},
-          ${run.status},
-          ${runJson},
-          ${run.createdAt},
-          ${run.updatedAt},
-          ${run.completedAt}
-        )
-        ON CONFLICT(workflow_run_id) DO UPDATE SET
-          workflow_id = excluded.workflow_id,
-          project_id = excluded.project_id,
-          status = excluded.status,
-          run_json = excluded.run_json,
-          created_at = excluded.created_at,
-          updated_at = excluded.updated_at,
-          completed_at = excluded.completed_at
-      `.pipe(Effect.mapError(toPersistenceSqlError("ProjectionPipeline.workflowRuns:upsert")));
+      const loadRun = (workflowRunId: WorkflowRunId) =>
+        readWorkflowRunProjectionRow({ workflowRunId }).pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectionPipeline.workflowRuns:read")),
+          Effect.map((row) => Option.map(row, (value) => value.run)),
+        );
+
+      const upsertRun = (run: WorkflowRunModel) =>
+        sql`
+          INSERT INTO projection_workflow_runs (
+            workflow_run_id,
+            workflow_id,
+            project_id,
+            status,
+            run_json,
+            created_at,
+            updated_at,
+            completed_at
+          )
+          VALUES (
+            ${run.id},
+            ${run.workflowId},
+            ${run.projectId},
+            ${run.status},
+            ${JSON.stringify(run)},
+            ${run.createdAt},
+            ${run.updatedAt},
+            ${run.completedAt}
+          )
+          ON CONFLICT(workflow_run_id) DO UPDATE SET
+            workflow_id = excluded.workflow_id,
+            project_id = excluded.project_id,
+            status = excluded.status,
+            run_json = excluded.run_json,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at,
+            completed_at = excluded.completed_at
+        `.pipe(Effect.mapError(toPersistenceSqlError("ProjectionPipeline.workflowRuns:upsert")));
+
+      switch (event.type) {
+        case "workflow.run-started":
+          yield* upsertRun(event.payload.run);
+          return;
+        case "workflow.run-paused": {
+          const run = yield* loadRun(event.payload.workflowRunId);
+          if (Option.isNone(run)) return;
+          yield* upsertRun({
+            ...run.value,
+            status: "paused",
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+        case "workflow.run-resumed": {
+          const run = yield* loadRun(event.payload.workflowRunId);
+          if (Option.isNone(run)) return;
+          yield* upsertRun({
+            ...run.value,
+            status: "running",
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+        case "workflow.run-stopping": {
+          const run = yield* loadRun(event.payload.workflowRunId);
+          if (Option.isNone(run)) return;
+          yield* upsertRun({
+            ...run.value,
+            status: "stopping",
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+        case "workflow.run-completed": {
+          const run = yield* loadRun(event.payload.workflowRunId);
+          if (Option.isNone(run)) return;
+          yield* upsertRun({
+            ...run.value,
+            status: event.payload.status,
+            completedAt: event.payload.completedAt,
+            updatedAt: event.payload.completedAt,
+          });
+          return;
+        }
+        case "workflow.node-run-started": {
+          const run = yield* loadRun(event.payload.nodeRun.workflowRunId);
+          if (Option.isNone(run)) return;
+          const existingNodeRunIds = new Set(run.value.nodeRuns.map((nodeRun) => nodeRun.id));
+          yield* upsertRun({
+            ...run.value,
+            nodeRuns: existingNodeRunIds.has(event.payload.nodeRun.id)
+              ? run.value.nodeRuns.map((nodeRun) =>
+                  nodeRun.id === event.payload.nodeRun.id ? event.payload.nodeRun : nodeRun,
+                )
+              : [...run.value.nodeRuns, event.payload.nodeRun],
+            updatedAt: event.payload.nodeRun.updatedAt,
+          });
+          return;
+        }
+        case "workflow.node-run-completed": {
+          const run = yield* loadRun(event.payload.workflowRunId);
+          if (Option.isNone(run)) return;
+          yield* upsertRun({
+            ...run.value,
+            nodeRuns: run.value.nodeRuns.map((nodeRun) =>
+              nodeRun.id === event.payload.nodeRunId
+                ? {
+                    ...nodeRun,
+                    status: "completed",
+                    ...(event.payload.output !== undefined ? { output: event.payload.output } : {}),
+                    error: null,
+                    completedAt: event.payload.completedAt,
+                    updatedAt: event.payload.completedAt,
+                  }
+                : nodeRun,
+            ),
+            updatedAt: event.payload.completedAt,
+          });
+          return;
+        }
+        case "workflow.node-run-failed": {
+          const run = yield* loadRun(event.payload.workflowRunId);
+          if (Option.isNone(run)) return;
+          yield* upsertRun({
+            ...run.value,
+            status: "failed",
+            completedAt: event.payload.completedAt,
+            nodeRuns: run.value.nodeRuns.map((nodeRun) =>
+              nodeRun.id === event.payload.nodeRunId
+                ? {
+                    ...nodeRun,
+                    status: "failed",
+                    error: event.payload.error,
+                    completedAt: event.payload.completedAt,
+                    updatedAt: event.payload.completedAt,
+                  }
+                : nodeRun,
+            ),
+            updatedAt: event.payload.completedAt,
+          });
+          return;
+        }
+        default:
+          return;
+      }
     });
 
     const projectors: ReadonlyArray<ProjectorDefinition> = [

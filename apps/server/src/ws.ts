@@ -297,6 +297,23 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const toShellStreamEvent = (
         event: OrchestrationEvent,
       ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>, never, never> => {
+        const workflowRunUpsertFromProjection = (workflowRunId: string) =>
+          projectionSnapshotQuery.getCommandReadModel().pipe(
+            Effect.map((readModel) => {
+              const run = (readModel.workflowRuns ?? []).find(
+                (entry) => entry.id === workflowRunId,
+              );
+              return run
+                ? Option.some({
+                    kind: "workflow-run-upserted" as const,
+                    sequence: event.sequence,
+                    run,
+                  } satisfies OrchestrationShellStreamEvent)
+                : Option.none<OrchestrationShellStreamEvent>();
+            }),
+            Effect.catch(() => Effect.succeed(Option.none())),
+          );
+
         switch (event.type) {
           case "project.created":
           case "project.meta-updated":
@@ -363,6 +380,15 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                 run: event.payload.run,
               }),
             );
+          case "workflow.run-paused":
+          case "workflow.run-resumed":
+          case "workflow.run-stopping":
+          case "workflow.run-completed":
+          case "workflow.node-run-completed":
+          case "workflow.node-run-failed":
+            return workflowRunUpsertFromProjection(event.payload.workflowRunId);
+          case "workflow.node-run-started":
+            return workflowRunUpsertFromProjection(event.payload.nodeRun.workflowRunId);
           default:
             if (event.aggregateKind !== "thread") {
               return Effect.succeed(Option.none());

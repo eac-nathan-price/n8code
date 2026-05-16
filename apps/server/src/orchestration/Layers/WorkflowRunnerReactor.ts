@@ -344,6 +344,25 @@ const make = Effect.gen(function* () {
           updatedAt: event.payload.completedAt,
         }));
         return scheduleRunnableNodes(event.payload.workflowRunId);
+      case "workflow.node-run-failed":
+        updateRun(event.payload.workflowRunId, (run) => ({
+          ...run,
+          status: "failed",
+          completedAt: event.payload.completedAt,
+          nodeRuns: run.nodeRuns.map((nodeRun) =>
+            nodeRun.id === event.payload.nodeRunId
+              ? {
+                  ...nodeRun,
+                  status: "failed",
+                  error: event.payload.error,
+                  completedAt: event.payload.completedAt,
+                  updatedAt: event.payload.completedAt,
+                }
+              : nodeRun,
+          ),
+          updatedAt: event.payload.completedAt,
+        }));
+        return Effect.void;
       case "thread.turn-diff-completed":
         return completeNodeForThread(event.payload.threadId);
       default:

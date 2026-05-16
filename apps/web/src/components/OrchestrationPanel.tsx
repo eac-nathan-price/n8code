@@ -7,6 +7,7 @@ import {
   type EnvironmentId,
   type ModelSelection,
   type ProviderInstanceId,
+  type ThreadId,
   type WorkflowNodeDefinition,
   type WorkflowId,
   WorkflowRunId,
@@ -15,12 +16,20 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { readEnvironmentApi } from "~/environmentApi";
+import { retainThreadDetailSubscription } from "~/environments/runtime/service";
 import { useSettings } from "~/hooks/useSettings";
 import { getAppModelOptionsForInstance } from "~/modelSelection";
 import { deriveProviderInstanceEntries, sortProviderInstanceEntries } from "~/providerInstances";
 import { useServerProviders } from "~/rpc/serverState";
 import { selectEnvironmentState, useStore } from "~/store";
 import { cn } from "~/lib/utils";
+
+const EDGE_MIN_ANIMATION_MS = 1_000;
+
+type NodePosition = {
+  readonly x: number;
+  readonly y: number;
+};
 
 function id(prefix: string): string {
   return `${prefix}:${crypto.randomUUID()}`;
@@ -44,6 +53,22 @@ function parseModelSelectionKey(value: string): ModelSelection | null {
 
 function modelSelectionLabel(selection: ModelSelection | null): string {
   return selection ? `${selection.instanceId} / ${selection.model}` : "None";
+}
+
+function timestampMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatDebugPayload(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function ModelSelectionSelect(props: {
@@ -112,6 +137,22 @@ export function OrchestrationPanel(props: {
   const selectedNode = workflow?.nodes.find((node) => node.id === selectedNodeId) ?? null;
   const [promptDraft, setPromptDraft] = useState("");
   const [goal, setGoal] = useState("");
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [nodePositions, setNodePositions] = useState<Record<string, NodePosition>>({});
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
+
+  const workflowThreadIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          latestRun?.nodeRuns
+            .map((nodeRun) => nodeRun.threadId)
+            .filter((threadId): threadId is ThreadId => threadId !== null) ?? [],
+        ),
+      ),
+    [latestRun],
+  );
 
   useEffect(() => {
     setSelectedNodeId(null);
@@ -120,6 +161,40 @@ export function OrchestrationPanel(props: {
   useEffect(() => {
     setPromptDraft(selectedNode?.config.promptTemplate ?? "");
   }, [selectedNode?.id, selectedNode?.config.promptTemplate]);
+
+  useEffect(() => {
+    setNodePositions(
+      Object.fromEntries(
+        workflow?.nodes.map((node) => [
+          node.id,
+          {
+            x: node.position.x,
+            y: node.position.y,
+          },
+        ]) ?? [],
+      ),
+    );
+    setHoveredNodeId(null);
+    setDraggingNodeId(null);
+  }, [workflow?.id, workflow?.nodes]);
+
+  useEffect(() => {
+    if (workflowThreadIds.length === 0) return;
+    const releases = workflowThreadIds.map((threadId) =>
+      retainThreadDetailSubscription(props.environmentId, threadId),
+    );
+    return () => {
+      for (const release of releases) {
+        release();
+      }
+    };
+  }, [props.environmentId, workflowThreadIds]);
+
+  useEffect(() => {
+    if (latestRun?.status !== "running") return;
+    const interval = window.setInterval(() => setNowMs(Date.now()), 250);
+    return () => window.clearInterval(interval);
+  }, [latestRun?.status]);
 
   const graph = useMemo(() => {
     const nodeRuns = new Map(latestRun?.nodeRuns.map((run) => [run.nodeId, run]) ?? []);
@@ -133,13 +208,18 @@ export function OrchestrationPanel(props: {
           null;
         return {
           id: node.id,
-          position: node.position,
+          position: nodePositions[node.id] ?? node.position,
           data: {
             label: (
               <div className="min-w-36">
                 <div className="text-xs uppercase text-muted-foreground">{node.kind}</div>
                 <div className="font-medium">{node.title}</div>
                 <div className="mt-1 text-xs text-muted-foreground">{run?.status ?? "not run"}</div>
+                {run?.status === "running" ? (
+                  <div className="mt-2 h-1 overflow-hidden rounded-full bg-primary/15">
+                    <div className="h-full w-1/2 animate-pulse rounded-full bg-primary" />
+                  </div>
+                ) : null}
                 <div className="mt-1 max-w-44 truncate text-[0.7rem] text-muted-foreground">
                   {modelSelectionLabel(effectiveModel)}
                 </div>
@@ -147,23 +227,69 @@ export function OrchestrationPanel(props: {
             ),
           },
           className: cn(
-            "rounded-lg border bg-card p-2 text-card-foreground shadow-sm",
+            "rounded-lg border bg-card p-2 text-card-foreground shadow-sm transition-[border-color,box-shadow,transform] duration-150",
+            hoveredNodeId === node.id &&
+              "border-primary/70 shadow-lg shadow-primary/20 ring-1 ring-primary/30",
+            draggingNodeId === node.id &&
+              "scale-[1.02] cursor-grabbing border-primary shadow-xl shadow-primary/30 ring-2 ring-primary/40",
             run?.status === "running" && "border-primary shadow-primary/30",
             run?.status === "failed" && "border-destructive",
             run?.status === "completed" && "border-emerald-500",
           ),
         };
       }) ?? [];
+    const outgoingEdgeCountByNodeId = new Map<string, number>();
+    for (const edge of workflow?.edges ?? []) {
+      outgoingEdgeCountByNodeId.set(
+        edge.sourceNodeId,
+        (outgoingEdgeCountByNodeId.get(edge.sourceNodeId) ?? 0) + 1,
+      );
+    }
+
     const edges: Edge[] =
-      workflow?.edges.map((edge) => ({
-        id: edge.id,
-        source: edge.sourceNodeId,
-        target: edge.targetNodeId,
-        label: edge.condition,
-        animated: latestRun?.status === "running",
-      })) ?? [];
+      workflow?.edges.map((edge) => {
+        const sourceRun = nodeRuns.get(edge.sourceNodeId);
+        const targetRun = nodeRuns.get(edge.targetNodeId);
+        const sourceCompletedAt = timestampMs(sourceRun?.completedAt);
+        const targetStartedAt = timestampMs(targetRun?.startedAt);
+        const animateUntil =
+          sourceCompletedAt === null
+            ? null
+            : targetStartedAt === null
+              ? Number.POSITIVE_INFINITY
+              : Math.max(sourceCompletedAt + EDGE_MIN_ANIMATION_MS, targetStartedAt);
+        const isUsedTransition =
+          sourceRun?.status === "completed" &&
+          targetRun !== undefined &&
+          targetRun.status !== "pending";
+        const isWaitingForTarget =
+          sourceRun?.status === "completed" &&
+          targetRun?.status === "pending" &&
+          outgoingEdgeCountByNodeId.get(edge.sourceNodeId) === 1;
+        const animated =
+          sourceCompletedAt !== null &&
+          (isUsedTransition || isWaitingForTarget) &&
+          nowMs < (animateUntil ?? 0);
+        return {
+          id: edge.id,
+          source: edge.sourceNodeId,
+          target: edge.targetNodeId,
+          animated,
+          className: cn(animated && "stroke-primary"),
+          ...(edge.condition !== undefined ? { label: edge.condition } : {}),
+          ...(animated ? { style: { strokeWidth: 2 } } : {}),
+        };
+      }) ?? [];
     return { nodes, edges };
-  }, [latestRun, project?.defaultModelSelection, workflow]);
+  }, [
+    draggingNodeId,
+    hoveredNodeId,
+    latestRun,
+    nodePositions,
+    nowMs,
+    project?.defaultModelSelection,
+    workflow,
+  ]);
 
   const dispatch = useCallback(
     async (command: ClientOrchestrationCommand) => {
@@ -192,6 +318,18 @@ export function OrchestrationPanel(props: {
       });
     },
     [dispatch, workflow],
+  );
+
+  const persistNodePosition = useCallback(
+    async (nodeId: string, position: { readonly x: number; readonly y: number }) => {
+      if (!workflow) return;
+      await updateWorkflow({
+        nodes: workflow.nodes.map((node) =>
+          node.id === nodeId ? { ...node, position: { x: position.x, y: position.y } } : node,
+        ),
+      });
+    },
+    [updateWorkflow, workflow],
   );
 
   const updateSelectedNode = useCallback(
@@ -246,6 +384,72 @@ export function OrchestrationPanel(props: {
       window.clearTimeout(timeout);
     };
   }, [promptDraft, selectedNode, updateSelectedNode, workflow]);
+
+  const debugText = useMemo(() => {
+    if (!workflow || !latestRun) {
+      return "No workflow run selected.";
+    }
+
+    const nodeById = new Map(workflow.nodes.map((node) => [node.id, node]));
+    const sections = latestRun.nodeRuns.map((nodeRun) => {
+      const node = nodeById.get(nodeRun.nodeId);
+      const title = node?.title ?? nodeRun.nodeId;
+      const lines = [
+        `# ${title}`,
+        `nodeRunId: ${nodeRun.id}`,
+        `status: ${nodeRun.status}`,
+        `threadId: ${nodeRun.threadId ?? "none"}`,
+      ];
+
+      if (nodeRun.error) {
+        lines.push(`error: ${nodeRun.error}`);
+      }
+
+      if (nodeRun.threadId === null) {
+        lines.push("No thread has been started for this node yet.");
+        return lines.join("\n");
+      }
+
+      const messageIds = environmentState.messageIdsByThreadId[nodeRun.threadId] ?? [];
+      const messagesById = environmentState.messageByThreadId[nodeRun.threadId] ?? {};
+      const activityIds = environmentState.activityIdsByThreadId[nodeRun.threadId] ?? [];
+      const activitiesById = environmentState.activityByThreadId[nodeRun.threadId] ?? {};
+
+      if (messageIds.length === 0 && activityIds.length === 0) {
+        lines.push("Waiting for thread output...");
+        return lines.join("\n");
+      }
+
+      for (const activityId of activityIds) {
+        const activity = activitiesById[activityId];
+        if (!activity) continue;
+        lines.push(
+          `[activity ${activity.createdAt}] ${activity.kind}: ${activity.summary}`,
+          formatDebugPayload(activity.payload),
+        );
+      }
+
+      for (const messageId of messageIds) {
+        const message = messagesById[messageId];
+        if (!message) continue;
+        lines.push(
+          `[message ${message.createdAt}] ${message.role}${message.streaming ? " (streaming)" : ""}:`,
+          message.text.trim() || "(empty)",
+        );
+      }
+
+      return lines.filter((line) => line.length > 0).join("\n");
+    });
+
+    return sections.join("\n\n---\n\n");
+  }, [
+    environmentState.activityByThreadId,
+    environmentState.activityIdsByThreadId,
+    environmentState.messageByThreadId,
+    environmentState.messageIdsByThreadId,
+    latestRun,
+    workflow,
+  ]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
@@ -302,6 +506,34 @@ export function OrchestrationPanel(props: {
             edges={graph.edges}
             fitView
             onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            onNodeMouseEnter={(_, node) => setHoveredNodeId(node.id)}
+            onNodeMouseLeave={(_, node) => {
+              setHoveredNodeId((current) => (current === node.id ? null : current));
+            }}
+            onNodeDragStart={(_, node) => {
+              setDraggingNodeId(node.id);
+              setHoveredNodeId(node.id);
+            }}
+            onNodeDrag={(_, node) => {
+              setNodePositions((current) => ({
+                ...current,
+                [node.id]: {
+                  x: node.position.x,
+                  y: node.position.y,
+                },
+              }));
+            }}
+            onNodeDragStop={(_, node) => {
+              setDraggingNodeId(null);
+              setNodePositions((current) => ({
+                ...current,
+                [node.id]: {
+                  x: node.position.x,
+                  y: node.position.y,
+                },
+              }));
+              void persistNodePosition(node.id, node.position);
+            }}
           >
             <Background color="hsl(var(--border))" />
             <Controls className="overflow-hidden rounded-md border border-border bg-card text-foreground [&_button]:!border-border [&_button]:!bg-card [&_button]:!text-foreground [&_button:hover]:!bg-accent [&_svg]:!fill-current" />
@@ -322,59 +554,72 @@ export function OrchestrationPanel(props: {
           </div>
         )}
       </div>
-      <div className="max-h-52 overflow-auto border-t border-border p-3 text-sm">
-        {selectedNode ? (
-          <div className="space-y-2">
-            <div className="font-medium">{selectedNode.title}</div>
-            <div className="text-xs uppercase text-muted-foreground">{selectedNode.kind}</div>
-            <ModelSelectionSelect
-              label="Node model"
-              value={selectedNode.config.modelSelection ?? null}
-              inheritLabel={`Inherit workflow default (${modelSelectionLabel(
-                workflow?.defaultModelSelection ?? project?.defaultModelSelection ?? null,
-              )})`}
-              onChange={(selection) =>
-                void updateSelectedNode((node) => ({
-                  ...node,
-                  config: {
-                    ...node.config,
-                    modelSelection: selection,
-                  },
-                }))
-              }
-            />
-            <label className="block space-y-1 text-xs">
-              <span className="font-medium text-muted-foreground">Prompt</span>
-              <textarea
-                className="h-24 w-full resize-none rounded-md border border-border bg-background p-2 text-xs"
-                value={promptDraft}
-                onChange={(event) => setPromptDraft(event.target.value)}
+      <div className="grid max-h-72 grid-cols-1 overflow-hidden border-t border-border text-sm lg:grid-cols-[minmax(260px,0.9fr)_minmax(360px,1.1fr)]">
+        <div className="overflow-auto border-b border-border p-3 lg:border-b-0 lg:border-r">
+          {selectedNode ? (
+            <div className="space-y-2">
+              <div className="font-medium">{selectedNode.title}</div>
+              <div className="text-xs uppercase text-muted-foreground">{selectedNode.kind}</div>
+              <ModelSelectionSelect
+                label="Node model"
+                value={selectedNode.config.modelSelection ?? null}
+                inheritLabel={`Inherit workflow default (${modelSelectionLabel(
+                  workflow?.defaultModelSelection ?? project?.defaultModelSelection ?? null,
+                )})`}
+                onChange={(selection) =>
+                  void updateSelectedNode((node) => ({
+                    ...node,
+                    config: {
+                      ...node.config,
+                      modelSelection: selection,
+                    },
+                  }))
+                }
               />
-            </label>
-            <button
-              type="button"
-              className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-50"
-              disabled={promptDraft === selectedNode.config.promptTemplate}
-              onClick={() =>
-                void updateSelectedNode((node) => ({
-                  ...node,
-                  config: {
-                    ...node.config,
-                    promptTemplate: promptDraft,
-                  },
-                }))
-              }
-            >
-              Save now
-            </button>
+              <label className="block space-y-1 text-xs">
+                <span className="font-medium text-muted-foreground">Prompt</span>
+                <textarea
+                  className="h-24 w-full resize-none rounded-md border border-border bg-background p-2 text-xs"
+                  value={promptDraft}
+                  onChange={(event) => setPromptDraft(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-50"
+                disabled={promptDraft === selectedNode.config.promptTemplate}
+                onClick={() =>
+                  void updateSelectedNode((node) => ({
+                    ...node,
+                    config: {
+                      ...node.config,
+                      promptTemplate: promptDraft,
+                    },
+                  }))
+                }
+              >
+                Save now
+              </button>
+            </div>
+          ) : (
+            <div className="text-muted-foreground">
+              {latestRun
+                ? `Latest run: ${latestRun.status} with ${latestRun.nodeRuns.length} node runs`
+                : "Select a node to inspect its prompt and run state."}
+            </div>
+          )}
+        </div>
+        <div className="flex min-h-0 flex-col p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="font-medium">Raw agent output</div>
+            <div className="text-xs text-muted-foreground">
+              {workflowThreadIds.length} live thread{workflowThreadIds.length === 1 ? "" : "s"}
+            </div>
           </div>
-        ) : (
-          <div className="text-muted-foreground">
-            {latestRun
-              ? `Latest run: ${latestRun.status} with ${latestRun.nodeRuns.length} node runs`
-              : "Select a node to inspect its prompt and run state."}
-          </div>
-        )}
+          <pre className="min-h-32 flex-1 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+            {debugText}
+          </pre>
+        </div>
       </div>
     </div>
   );
